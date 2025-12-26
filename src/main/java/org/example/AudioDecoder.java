@@ -21,7 +21,7 @@ public class AudioDecoder {
     private static final int TARGET_SAMPLE_RATE   = 16_000; // 推理模型要求
     private static final int TARGET_WINDOW_SIZE   = TARGET_SAMPLE_RATE * 2; // 2 s = 32 000 样本
     private static final int SEEK_AHEAD_TOLERANCE = 3_000;  // 解码可领先播放 3 秒
-    private static final int SEEK_BOOST_TOLERANCE = 6_000;  // seek 后临时允许领先 6 秒
+    private static final int SEEK_BOOST_TOLERANCE = 3_000;  // seek 后临时允许领先 3 秒
     private static final int SEEK_BOOST_DURATION  = 2_000;  // seek 后 2 秒内使用加速模式
 
     /* ------------------------ 成员 ------------------------ */
@@ -65,7 +65,7 @@ public class AudioDecoder {
 
     /** 跳转到指定 ms（主线程调用） */
     public void seekTo(int ms) {
-        seekToMs = Math.max(ms - 4_000, 0); // 提前 4 秒，保证缓冲
+        seekToMs = Math.max(ms, 0); // 直接 seek 到当前位置
         lastSeekTime = System.currentTimeMillis(); // 记录 seek 时间，用于临时加速
         stop();
         startDecoding();

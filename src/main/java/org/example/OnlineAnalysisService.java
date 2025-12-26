@@ -25,6 +25,10 @@ public class OnlineAnalysisService {
     private static final long AUDIO_ANALYSIS_INTERVAL_MS = 100;          // 音频分析间隔
     private static final long FUSION_INTERVAL_MS = 800;                  // 融合结果间隔
     private static final long AUDIO_STEP_MS = 1000;                      // 音频推理步长
+    // ST-GCN++ 滑窗步长：每 8 帧推理一次
+    private static final int STGCN_STEP = 8;
+    // 推理门控计数：窗口满后，每 STGCN_STEP 帧触发一次推理
+    private int stgcnStrideCountdown = 0;
     
     // 静音检测参数
     private static final long SILENCE_RESET_THRESHOLD_MS = 5000;         // 静音超过5秒则重置（类似seek）
@@ -34,13 +38,22 @@ public class OnlineAnalysisService {
     private static final long MAX_AGE_MS = 2000;                         // 2秒时效
     private static final int MIN_OCCURRENCE_THRESHOLD = 3;               // 最小出现次数
     private static final float AUDIO_WEIGHT_FACTOR = 1.3f;               // 音频权重系数
-    private static final float VIDEO_WEIGHT_FACTOR = 0.8f;               // 视频权重系数
+    private static final float VIDEO_WEIGHT_FACTOR = 0.7f;               // 视频权重系数
     
     // 蓝牙发送状态管理器相关变量（对齐离线模式）
     private static final long STABILITY_CONFIRM_TIME_MS = 1600;          // 稳定确认时间
     private static final long MIN_DURATION_TIME_MS = 2000;               // 最小持续时间
     private static final long SEND_INTERVAL_MS = 1600;                   // 发送间隔
-    
+    // =====================[ 频率档位确认与节流相关成员 ]=====================
+    // 档位（0..10）确认状态
+    private volatile int currentLevel = 0;                 // 已确认生效的档位
+    private volatile long currentLevelSinceMs = 0L;        // 当前档位生效起点
+    private volatile Integer pendingLevel = null;          // 待确认档位
+    private volatile long pendingLevelSinceMs = 0L;        // 待确认起点
+
+    // 档位确认参数（融合循环=800ms，因此短稳=800ms 即 1 tick）
+    private static final long LEVEL_STABLE_MS   = 0;     // 新档位短稳确认
+    private static final long LEVEL_MIN_DUR_MS  = 0;    // 生效档位最小驻留（≈2 tick）
     
     // 核心组件
     private ScreenCaptureHelper screenCapture;
@@ -260,7 +273,9 @@ public class OnlineAnalysisService {
         latestVideoConfidence = 0f;
         latestAudioConfidence = 0f;
         lastAudioInferMs = 0;
-        
+        stgcnStrideCountdown = 0; // 拖动/seek 后立即允许重新推理
+        resetBluetoothStateManager();
+
         System.out.println("[OnlineAnalysis] Analysis stopped");
     }
     
@@ -415,7 +430,9 @@ public class OnlineAnalysisService {
         
         // 清空蓝牙控制动作缓存
         resetBluetoothStateManager();
-        
+
+        stgcnStrideCountdown = 0; // 拖动/seek 后立即允许重新推理
+
         // 重置节律估计器（音频 + 视频）
         audioRhythmEstimator.reset();
         latestAudioRhythmHz = Float.NaN;
@@ -499,6 +516,14 @@ public class OnlineAnalysisService {
                 
                 // 如果窗口满了，进行动作识别
                 if (poseWindow.size() == WINDOW_SIZE) {
+
+                    // stride=8 门控：第一次窗口满立即推理，此后每 8 帧推理一次
+                    if (stgcnStrideCountdown > 0) {
+                        stgcnStrideCountdown--;
+                        return; // [ADD] 本帧不做 ST-GCN 推理
+                    }
+                    stgcnStrideCountdown = STGCN_STEP - 1;
+
                     float[][][] input = convertPoseWindowToInput(poseWindow);
                     input = ActionUtils.preNormalize2D(input);
                     float[] scores = inferenceHelper.runStgcnModel(input);
@@ -507,7 +532,14 @@ public class OnlineAnalysisService {
                         float[] probs = ActionUtils.softmax(scores);
                         String actionClass = ActionUtils.processStgcnOutput(probs);
                         float bestScore = ActionUtils.getBestScore(probs, actionClass);
-                        
+
+                        // 这里加入比例阈值过滤
+                        // 这里本质是比例阈值判定，噪声需要比目标类高50%才被认定，如果识别为 Noise 但置信度较低，则判定为 do
+                        if ("Noise".equals(actionClass) && bestScore < 0.6f) {
+                            actionClass = "do";
+                            bestScore = 1.0f - bestScore;
+                        }
+
                         latestVideoAction = actionClass;
                         latestVideoConfidence = bestScore;
                         latestVideoTimestamp = System.currentTimeMillis();
@@ -567,9 +599,16 @@ public class OnlineAnalysisService {
             
             int audioClassIndex = argMax(audioProbs);
             float audioProb = audioProbs[audioClassIndex];
-            float threshold = 0.4f;
+            float threshold = 0.0f;
             String audioClass = (audioProb < threshold) ? "Noise" : audioClasses[audioClassIndex];
-            
+
+            // 这里加入比例阈值过滤
+            // 这里本质是比例阈值判定，噪声需要比目标类高50%才被认定，如果识别为 Noise 但置信度较低，则判定为 do
+            if ("Noise".equals(audioClass) && audioProb < 0.6f) {
+                audioClass = "do";
+                audioProb = 1.0f - audioProb;
+            }
+
             latestAudioAction = audioClass;
             latestAudioConfidence = audioProb;
             latestAudioTimestamp = System.currentTimeMillis();
@@ -615,6 +654,14 @@ public class OnlineAnalysisService {
             audioAction = "";
             audioConf = 0f;
         }
+
+        // 动作类型归一化："oral" 统一处理为 "do"
+        if ("oral".equals(videoAction)) {
+            videoAction = "do";
+        }
+        if ("oral".equals(audioAction)) {
+            audioAction = "do";
+        }
         
         // 第三步：添加当前记录到历史窗口
         synchronized (historyLock) {
@@ -649,15 +696,10 @@ public class OnlineAnalysisService {
             videoFreq = Float.NaN;
             videoFreqConf = 0f;
         }
-        
-        // 融合音视频节律（优先使用音频节律）
-        float finalFreq = audioFreq;
-        if (Float.isNaN(finalFreq) && !Float.isNaN(videoFreq)) {
-            finalFreq = videoFreq;
-        }
-        
-        // 将频率映射为档位
-        int finalLevel = mapFreqToLevel(finalFreq);
+
+        // 临时采用音频节律作为最终节律
+        // 将“最终节律计算”封装为独立方法，便于后续替换为音视频融合节律
+        int finalLevel = computeFinalFreq(audioFreq, audioFreqConf, videoFreq, videoFreqConf);
         
         // 第六步：使用蓝牙发送状态管理器，实现二级平滑策略 + 档位确认
         managedBluetoothUpdate(finalAction, finalLevel);
@@ -669,6 +711,48 @@ public class OnlineAnalysisService {
                 resultCallback.onFusedActionUpdated(finalAction);
             }
         }
+    }
+
+    /**
+     * 12.11 计算最终节律档位（0..10）。
+     *
+     * <p>当前策略：仅使用音频节律映射为档位，并做“置信度阈值 + 方向性门控（涨档更严格，降档更宽松）”。
+     * 预留 videoFreq/videoFreqConf 参数，便于未来扩展为音视频融合节律。</p>
+     */
+    private int computeFinalFreq(float audioFreq, float audioFreqConf, float videoFreq, float videoFreqConf) {
+        // 临时采用音频节律作为最终节律
+        int finalFreq = mapFreqToLevel(audioFreq);
+        int videoFre = mapFreqToLevel(videoFreq);
+
+        // === 12.12: 方向性置信度门控（涨档更严格，降档更宽松） ===
+        {
+            float conf = audioFreqConf;      // 当前这帧的置信度
+
+            // 三个可调参数
+            final float CONF_IGNORE = 0.12f;  // 极低置信度：整体忽略本次节律
+            final float CONF_UP     = 0.35f;  // 涨档所需置信度（更严格）
+            final float CONF_DOWN   = 0.20f;  // 降档所需置信度（相对宽松）
+
+            int curLevel       = currentLevel;  // 当前已生效档位（0..10）
+            int candidateLevel = finalFreq;     // 本次根据 audioFreq 映射出来的档位
+
+            // 1) 极低置信度：直接清空本次节律，维持 currentLevel
+            if (Float.isNaN(audioFreq) || conf < CONF_IGNORE) {
+                finalFreq = curLevel;  // 不给 updateBluetoothState 提供变档机会
+            } else {
+                // 2) 根据档位变动方向应用不同门槛
+                if (candidateLevel > curLevel && conf < CONF_UP) {
+                    // 尝试“涨档”但置信度不足 → 不允许涨档
+                    finalFreq = curLevel;
+                } else if (candidateLevel < curLevel && conf < CONF_DOWN) {
+                    // 尝试“降档”但置信度也太低 → 不允许降档（可视需要放宽）
+                    finalFreq = curLevel;
+                }
+                // candidateLevel == curLevel 时无需处理
+            }
+        }
+
+        return finalFreq;
     }
     
     // 辅助方法（从VideoProcessController复用）
@@ -787,36 +871,60 @@ public class OnlineAnalysisService {
         return "Noise";
     }
     
-    /**
-     * 频率→档位映射（对齐离线模式）
+
+    /* 频率->10档映射占位表（index 1..10：对应档位1~10；0为停止）
+    “周期性事件”指的是：一次完整的抽插周期（前推 + 后拉，或一次节律峰到下一次节律峰）
+    1 Hz = 1 次/秒 的完整抽插周期
+     * 频率 -> 10 档映射（真实机械频率）
+     * 说明：
+     * - 1 次抽插 = 马达 3 转
+     * - freq = RPM / 180
+     * - 当前硬件可达范围 ≈ 1.0 – 1.8 Hz
      */
     private static final float[][] LEVEL_RANGES = new float[][]{
-        null,                // 0占位（停止）
-        {0.05f, 0.80f},      // 档1
-        {0.80f, 1.10f},      // 档2
-        {1.10f, 1.40f},      // 档3
-        {1.40f, 1.80f},      // 档4
-        {1.80f, 2.30f},      // 档5
-        {2.30f, 2.80f},      // 档6
-        {2.80f, 3.40f},      // 档7
-        {3.40f, 4.10f},      // 档8
-        {4.10f, 4.80f},      // 档9
-        {4.80f, 6.00f}       // 档10
+            null,                // 0 占位（停止）
+            {0.95f, 1.12f},      // 档1 ≈ 190 RPM (1.06 Hz)
+            {1.12f, 1.27f},      // 档2 ≈ 220 RPM (1.22 Hz)
+            {1.27f, 1.40f},      // 档3 ≈ 240 RPM (1.33 Hz)
+            {1.40f, 1.53f},      // 档4 ≈ 270 RPM (1.50 Hz)
+            {1.53f, 1.58f},      // 档5 ≈ 280 RPM (1.56 Hz)
+            {1.58f, 1.63f},      // 档6 ≈ 290 RPM (1.61 Hz)
+            {1.63f, 1.66f},      // 档7 ≈ 295 RPM (1.64 Hz)
+            {1.66f, 1.70f},      // 档8 ≈ 300 RPM (1.67 Hz)
+            {1.70f, 1.75f},      // 档9 ≈ 310 RPM (1.72 Hz)
+            {1.75f, 1.85f}       // 档10 ≈ 320 RPM (1.78 Hz)
     };
-    
+
     private static int mapFreqToLevel(final float hz) {
         if (Float.isNaN(hz) || hz <= 0f) return 0;
         for (int lvl = 1; lvl <= 10; lvl++) {
             float[] r = LEVEL_RANGES[lvl];
-            if (r != null && hz >= r[0] && hz < r[1]) return lvl;
+            if (r != null && hz >= r[0] && hz < r[1]){
+                return Math.min(lvl, 9);
+            }
         }
-        return 10;
+        return 9; // 超出则钳到最高档
     }
     
     
     /**
      * 蓝牙发送状态管理器（对齐离线模式）
      */
+
+    // 迟滞阈值（Schmitt）
+    private static int upThreshold(int cur)   { return Math.min(10, cur + 1); }
+    private static int downThreshold(int cur) { return Math.max(0,  cur - 1); }
+
+    // 门控——是否属于做爱大类/是否允许变速（按你 Windows 的动作命名规则改）
+    private static boolean isSexAction(String action) {
+        // 示例：你这里 audioClasses = {"do","oral","Noise"}，video/action 也常见 "do"
+        return "do".equalsIgnoreCase(action) || "sex".equalsIgnoreCase(action);
+    }
+    private boolean currentStateSupportsSpeed() {
+        // 如需限制某些模式固定速度，可在这里判断 currentBluetoothState
+        return true;
+    }
+
     private void managedBluetoothUpdate(String finalAction, int finalFreq) {
         long currentTime = System.currentTimeMillis();
         
@@ -828,8 +936,44 @@ public class OnlineAnalysisService {
         if (bleManager != null && bleManager.isPaused()) {
             return;
         }
-        
+
+        // levelToSend 不再直接透传 finalFreq，而是先做档位确认
         int levelToSend = finalFreq;
+        // =====================[ 档位确认（迟滞 + 短稳 + 最小驻留） ]=====================
+        boolean supportsLevel = isSexAction(finalAction) && currentStateSupportsSpeed(); // NEW
+
+        if (supportsLevel) {
+            int latestLevel = finalFreq; // 0..10
+
+            // 迟滞：只有跨过 currentLevel±1 才认为值得处理
+            if (latestLevel >= upThreshold(currentLevel) || latestLevel <= downThreshold(currentLevel)) {
+
+                // 新候选档位出现：开始计时
+                if (pendingLevel == null || pendingLevel.intValue() != latestLevel) {
+                    pendingLevel = latestLevel;
+                    pendingLevelSinceMs = currentTime;
+                } else {
+                    long dwell = currentTime - pendingLevelSinceMs;
+                    boolean stableOk = (dwell >= LEVEL_STABLE_MS); // 800ms = 1个融合tick
+
+                    // 当前档位已驻留足够久，且候选档位稳定 ≥800ms → 切换生效
+                    if (stableOk && (currentTime - currentLevelSinceMs >= LEVEL_MIN_DUR_MS)) {
+                        currentLevel = pendingLevel;
+                        currentLevelSinceMs = currentTime;
+                    }
+                }
+            } else {
+                // 未跨阈值：清空 pending，避免无意义计时
+                pendingLevel = null;
+            }
+
+            // 最终用于发送的档位取已确认的 currentLevel
+            levelToSend = currentLevel;
+        } else {
+            pendingLevel = 0;
+            // 若非做爱动作，你也可以选择 levelToSend=0 或保持 finalFreq（看你协议策略）
+        }
+        // =====================档位确认结束 ======================
         
         // 动作稳定确认
         if (!finalAction.equals(pendingBluetoothState)) {
@@ -888,6 +1032,11 @@ public class OnlineAnalysisService {
         lastBluetoothSendTime = 0;
         
         lastSentLevel = 0;
+        // 重置档位确认状态
+        currentLevel = 0;
+        currentLevelSinceMs = 0L;
+        pendingLevel = null;
+        pendingLevelSinceMs = 0L;
         
         log("蓝牙管理器：状态已完全重置（包括档位）");
     }

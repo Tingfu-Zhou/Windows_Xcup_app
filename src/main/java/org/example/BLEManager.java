@@ -621,36 +621,36 @@ public class BLEManager {
             }
             
             // 处理命令
-            if (cmd == (byte)(0x80 + CMD_SET_PATTERN) ||
-                    cmd == (byte)(0x80 + CMD_STOP_ALL) ||
-                    cmd == (byte)(0x80 + CMD_QUERY_STATE)) {
+            // [MOD] 处理命令：对齐 Android 的 ACK 处理结构
+            if (cmd == (0x80 + CMD_SET_PATTERN) ||
+                    cmd == (0x80 + CMD_STOP_ALL) ||
+                    cmd == (0x80 + CMD_RESUME_APP)) {
+
                 // ACK
                 if (payload.length >= 2) {
-                    byte ackSeq = payload[0];
-                    byte status = payload[1];
+                    int ackSeq = payload[0] & 0xFF;     // [MOD] 对齐 Android：无符号
+                    int status = payload[1] & 0xFF;     // [ADD] 对齐 Android：无符号
                     log(String.format("收到ACK: CMD=0x%02X SEQ=%d STATUS=%d",
-                            cmd & 0xFF, ackSeq & 0xFF, status & 0xFF));
-                    
-                    // 锁定期：ACK=BUSY -> 进入暂停
+                            cmd & 0xFF, ackSeq, status));
+
+                    // 锁定期：ACK=BUSY -> 进入暂停态（Android 对 RESUME_APP 也生效）
                     if (status == 1) { // BUSY
                         setPaused(true);
                     }
-                }
-            } else if (cmd == (byte)(0x80 + CMD_RESUME_APP)) {
-                // 恢复命令ACK
-                if (payload.length >= 2) {
-                    byte status = payload[1];
-                    if (status == 0) { // OK
+
+                    // 恢复命令成功：RESUME_APP 且 OK -> 解除暂停
+                    if (cmd == (0x80 + CMD_RESUME_APP) && status == 0) { // OK
                         setPaused(false);
                     }
                 }
+
             } else if (cmd == CMD_STATE_RPT) {
                 log("收到状态报告，长度=" + payload.length);
                 parseStateReport(payload);
             } else {
                 log(String.format("收到命令: 0x%02X 长度=%d", cmd & 0xFF, len));
             }
-            
+
         } catch (Exception e) {
             log("解析帧失败: " + e.getMessage());
         }
