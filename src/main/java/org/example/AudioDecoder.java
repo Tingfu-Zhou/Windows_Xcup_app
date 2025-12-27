@@ -58,10 +58,21 @@ public class AudioDecoder {
     }
 
     /** 请求停止解码线程 */
+    // 请求停止解码线程（并等待退出，避免 seek 后无法重启）
     public synchronized void stop() {
         stopRequested = true;
-        if (decodeThread != null) decodeThread.interrupt();
+
+        Thread t = decodeThread;
+        if (t != null) {
+            t.interrupt();
+            try {
+                t.join(800);                     // 等待线程退出（时间可调）
+            } catch (InterruptedException ignored) {
+            }
+        }
+        decodeThread = null;
     }
+
 
     /** 跳转到指定 ms（主线程调用） */
     public void seekTo(int ms) {

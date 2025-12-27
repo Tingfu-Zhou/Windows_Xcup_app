@@ -27,6 +27,8 @@ public class Main extends Application {
     private static final String RESUME_BTN_ENABLED_STYLE =
             "-fx-background-color: #FF8C00; -fx-text-fill: white; -fx-font-weight: bold;";
 
+    private Button btnScanConnect;  // 蓝牙连接按钮
+
     // 静态初始化块 - 在所有代码执行前运行
     static {
         // 首先修复控制台编码
@@ -110,7 +112,7 @@ public class Main extends Application {
         /* --------- 主菜单 UI --------- */
         Button btnSelectVideo      = new Button("选择本地视频");
         Button btnOnlineMode       = new Button("在线模式");
-        Button btnScanConnect      = new Button("一键扫描并连接蓝牙设备");
+        btnScanConnect = new Button("一键扫描并连接蓝牙设备");
 
         // 设置按钮样式
         btnOnlineMode.setStyle("-fx-background-color: #4CAF50; -fx-text-fill: white; -fx-font-weight: bold;");
@@ -245,7 +247,19 @@ public class Main extends Application {
      */
     private void onBLEConnectionChanged(Boolean connected) {
         System.out.println("[主菜单] BLE连接状态: " + (connected ? "已连接" : "未连接"));
-        // 可以在这里更新按钮文本或状态
+
+        // 在 JavaFX 线程中更新 UI
+        javafx.application.Platform.runLater(() -> {
+            if (btnScanConnect != null) {
+                if (connected) {
+                    btnScanConnect.setText("断开连接");
+                    btnScanConnect.setStyle("-fx-background-color: #F44336; -fx-text-fill: white; -fx-font-weight: bold;");
+                } else {
+                    btnScanConnect.setText("一键扫描并连接蓝牙设备");
+                    btnScanConnect.setStyle("-fx-background-color: #2196F3; -fx-text-fill: white; -fx-font-weight: bold;");
+                }
+            }
+        });
     }
     
     /**

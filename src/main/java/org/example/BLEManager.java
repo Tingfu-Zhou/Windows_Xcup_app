@@ -712,7 +712,7 @@ public class BLEManager {
             case "oral":
                 return buildSetPatternFrame(PATTERN_1, LEVEL, 2000, (byte)0);
             case "do":
-                return buildSetPatternFrame(PATTERN_2, LEVEL, 2000, (byte)0);
+                return buildSetPatternFrame(PATTERN_1, LEVEL, 2000, (byte)0);
             case "Noise":
                 return buildStopAllFrame();
             default:
@@ -730,7 +730,7 @@ public class BLEManager {
             case "oral":
                 return buildSetPatternFrame(PATTERN_1, intLevel, 2000, (byte)0);
             case "do":
-                return buildSetPatternFrame(PATTERN_2, intLevel, 2000, (byte)0);
+                return buildSetPatternFrame(PATTERN_1, intLevel, 2000, (byte)0);
             case "Noise":
                 return buildStopAllFrame();
             default:
