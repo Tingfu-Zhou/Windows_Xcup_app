@@ -201,6 +201,8 @@ public class VideoProcessController {
     /* ---------------------------- 其他补充 ---------------------------- */
     // 防止重复 close（避免 OrtSession 被二次关闭）
     private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.concurrent.atomic.AtomicBoolean running =
+            new java.util.concurrent.atomic.AtomicBoolean(true);
 
     /* ---------------------------- 构造与启动 ---------------------------- */
 
@@ -530,6 +532,7 @@ public class VideoProcessController {
 
     private void videoAnalysisCycle() {
         if (analysisPaused.get()) return;
+        if (!running.get()) return;
         long currentMs = getCurrentPositionMs();
         try {
             BufferedImage frame = frameExtractor.getFrameAt(currentMs * 1000L);
@@ -610,6 +613,7 @@ public class VideoProcessController {
 
     private void audioAnalysisCycle() {
         if (analysisPaused.get()) return;
+        if (!running.get()) return;
         long currentMs = getCurrentPositionMs();
         
         // 统一时序：使用视频时间差来计算缓冲等待
@@ -674,7 +678,9 @@ public class VideoProcessController {
 
     private void fusionCycle() {
         long currentTime = System.currentTimeMillis();
-        
+        if (analysisPaused.get()) return;
+        if (!running.get()) return;
+
         // 第一步：读取最新的分析结果（原子操作，线程安全）
         String videoAction = latestVideoAction;
         String audioAction = latestAudioAction;
@@ -1348,50 +1354,76 @@ public class VideoProcessController {
 
     /* ---------------------------- 资源关闭 ----------------------------- */
     public void close() {
-        // 幂等：只允许执行一次
         if (!closed.compareAndSet(false, true)) {
             log("close() ignored: already closed");
             return;
         }
 
-        // 重置蓝牙状态管理器，确保清空所有状态
+        // 先发“停止请求”，让各循环自行退出（不要靠 interrupt）
+        running.set(false);
+
         resetBluetoothStateManager();
-        
-        if (videoLoopFuture != null) videoLoopFuture.cancel(true);
-        if (audioLoopFuture != null) audioLoopFuture.cancel(true);
-        if (fusionLoopFuture != null) fusionLoopFuture.cancel(true);
 
-        scheduler.shutdownNow();
+        // 不要 cancel(true)；避免 interrupt 打断 native 调用
+        if (videoLoopFuture != null) videoLoopFuture.cancel(false);
+        if (audioLoopFuture != null) audioLoopFuture.cancel(false);
+        if (fusionLoopFuture != null) fusionLoopFuture.cancel(false);
 
-        if (mediaPlayer != null) {
-            mediaPlayer.dispose();
-            mediaPlayer = null; // 防止后续误用
+        // 优先温和关闭线程池并等待退出
+        scheduler.shutdown();
+        try {
+            if (!scheduler.awaitTermination(800, java.util.concurrent.TimeUnit.MILLISECONDS)) {
+                // 超时再兜底强杀
+                scheduler.shutdownNow();
+            }
+        } catch (InterruptedException e) {
+            scheduler.shutdownNow();
+            Thread.currentThread().interrupt();
         }
 
+        // MediaPlayer 的 stop/dispose 放到 FX 线程执行（避免 native 竞态）
+        if (mediaPlayer != null) {
+            MediaPlayer mp = mediaPlayer;
+            mediaPlayer = null;
+            try {
+                if (javafx.application.Platform.isFxApplicationThread()) {
+                    safeDisposeMediaPlayer(mp);
+                } else {
+                    javafx.application.Platform.runLater(() -> safeDisposeMediaPlayer(mp));
+                }
+            } catch (Throwable t) {
+                log("MediaPlayer dispose error: " + t);
+            }
+        }
+
+        // 其他资源：确保此时不会再有 loop 访问它们
         if (frameExtractor != null) {
-            frameExtractor.close();
+            try { frameExtractor.close(); } catch (Throwable t) { log("frameExtractor close err: " + t); }
             frameExtractor = null;
         }
 
         if (audioDecoder != null) {
-            audioDecoder.stop();
+            try { audioDecoder.stop(); } catch (Throwable t) { log("audioDecoder stop err: " + t); }
             audioDecoder = null;
         }
 
         if (inferenceHelper != null) {
-            inferenceHelper.close();
-            inferenceHelper = null; //关键：避免后续重复 close
+            try { inferenceHelper.close(); } catch (Throwable t) { log("inferenceHelper close err: " + t); }
+            inferenceHelper = null;
         }
 
         if (audioHelper != null) {
-            audioHelper.close();
+            try { audioHelper.close(); } catch (Throwable t) { log("audioHelper close err: " + t); }
             audioHelper = null;
         }
 
         log("VideoProcessController 已完全关闭，所有资源和状态已清理");
     }
 
-
+    private void safeDisposeMediaPlayer(MediaPlayer mp) {
+        try { mp.stop(); } catch (Throwable ignored) {}
+        try { mp.dispose(); } catch (Throwable ignored) {}
+    }
 
     public Runnable getOnBack() {
         return onBack;

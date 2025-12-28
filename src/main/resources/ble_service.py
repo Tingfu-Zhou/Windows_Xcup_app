@@ -2,6 +2,8 @@
 """
 BLE服务进程 - 使用Bleak库实现完整的BLE通信
 与Java主程序通过标准输入输出进行JSON通信
+
+修复: 解决应用关闭时stdout管道关闭导致的OSError错误
 """
 
 import asyncio
@@ -27,6 +29,10 @@ class BLEService:
         self.device_address = None
         self.device_name = None
 
+        # [FIX] 添加管道状态标志
+        self._pipe_closed = False
+        self._shutting_down = False
+
     def log(self, message: str, level: str = "INFO"):
         """发送日志消息到Java端"""
         self.send_message({
@@ -38,13 +44,28 @@ class BLEService:
 
     def send_message(self, message: dict):
         """发送JSON消息到Java端"""
+        # [FIX] 如果管道已关闭，直接返回不尝试写入
+        if self._pipe_closed:
+            return
+
         try:
             print(json.dumps(message), flush=True)
+        except (OSError, IOError, BrokenPipeError) as e:
+            # [FIX] 管道相关错误，标记管道已关闭，不再尝试写入
+            self._pipe_closed = True
+            # 写入stderr作为最后的调试手段（不会触发弹窗）
+            try:
+                sys.stderr.write(f"[BLE] Pipe closed: {e}\n")
+                sys.stderr.flush()
+            except:
+                pass
         except Exception as e:
-            print(json.dumps({
-                "type": "error",
-                "message": f"Failed to send message: {str(e)}"
-            }), flush=True)
+            # [FIX] 其他异常也不要再尝试写入stdout，避免递归
+            try:
+                sys.stderr.write(f"[BLE] Send error: {e}\n")
+                sys.stderr.flush()
+            except:
+                pass
 
     async def scan_devices(self, timeout: float = 10.0):
         """扫描BLE设备"""
@@ -200,24 +221,30 @@ class BLEService:
                         pass
 
                     await self.client.disconnect()
-                    self.log("已断开连接", "INFO")
+                    # [FIX] 只在管道未关闭时发送日志
+                    if not self._pipe_closed:
+                        self.log("已断开连接", "INFO")
 
                 self.client = None
 
             self.is_connected = False
 
-            self.send_message({
-                "type": "disconnect_result",
-                "success": True
-            })
+            # [FIX] 只在管道未关闭时发送结果
+            if not self._pipe_closed:
+                self.send_message({
+                    "type": "disconnect_result",
+                    "success": True
+                })
 
         except Exception as e:
-            self.log(f"断开连接失败: {str(e)}", "ERROR")
-            self.send_message({
-                "type": "disconnect_result",
-                "success": False,
-                "error": str(e)
-            })
+            # [FIX] 只在管道未关闭时发送错误
+            if not self._pipe_closed:
+                self.log(f"断开连接失败: {str(e)}", "ERROR")
+                self.send_message({
+                    "type": "disconnect_result",
+                    "success": False,
+                    "error": str(e)
+                })
 
     async def send_data(self, hex_data: str):
         """发送数据到BLE设备"""
@@ -262,6 +289,10 @@ class BLEService:
 
     def notification_handler(self, sender, data: bytearray):
         """处理接收到的通知数据"""
+        # [FIX] 如果正在关闭，不处理通知
+        if self._shutting_down or self._pipe_closed:
+            return
+
         try:
             # 将数据转换为十六进制字符串
             hex_data = ' '.join(f'{b:02X}' for b in data)
@@ -276,7 +307,8 @@ class BLEService:
             })
 
         except Exception as e:
-            self.log(f"处理通知失败: {str(e)}", "ERROR")
+            if not self._pipe_closed:
+                self.log(f"处理通知失败: {str(e)}", "ERROR")
 
     async def get_device_info(self):
         """获取设备信息"""
@@ -347,6 +379,8 @@ class BLEService:
                 await self.get_device_info()
 
             elif action == "exit":
+                # [FIX] 标记正在关闭
+                self._shutting_down = True
                 await self.disconnect()
                 return False  # 退出主循环
 
@@ -354,8 +388,9 @@ class BLEService:
                 self.log(f"未知命令: {action}", "WARNING")
 
         except Exception as e:
-            self.log(f"处理命令失败: {str(e)}", "ERROR")
-            traceback.print_exc()
+            if not self._pipe_closed:
+                self.log(f"处理命令失败: {str(e)}", "ERROR")
+                traceback.print_exc(file=sys.stderr)
 
         return True  # 继续主循环
 
@@ -373,12 +408,15 @@ class BLEService:
         # 启动标准输入读取任务
         async def stdin_reader():
             loop = asyncio.get_event_loop()
-            while True:
+            while not self._shutting_down:
                 try:
                     # 在执行器中运行阻塞的stdin读取
                     line = await loop.run_in_executor(None, sys.stdin.readline)
 
-                    if not line:  # EOF
+                    if not line:  # EOF - Java端已关闭
+                        # [FIX] 标记管道已关闭，避免后续写入
+                        self._pipe_closed = True
+                        self._shutting_down = True
                         await command_queue.put({"action": "exit"})
                         break
 
@@ -388,10 +426,12 @@ class BLEService:
                             command = json.loads(line)
                             await command_queue.put(command)
                         except json.JSONDecodeError as e:
-                            self.log(f"JSON解析错误: {e}", "ERROR")
+                            if not self._pipe_closed:
+                                self.log(f"JSON解析错误: {e}", "ERROR")
 
                 except Exception as e:
-                    self.log(f"读取输入失败: {e}", "ERROR")
+                    if not self._shutting_down and not self._pipe_closed:
+                        self.log(f"读取输入失败: {e}", "ERROR")
                     break
 
         # 启动stdin读取任务
@@ -399,7 +439,7 @@ class BLEService:
 
         # 主命令处理循环
         try:
-            while True:
+            while not self._shutting_down:
                 try:
                     # 等待命令（超时检查连接状态）
                     command = await asyncio.wait_for(
@@ -413,7 +453,7 @@ class BLEService:
 
                 except asyncio.TimeoutError:
                     # 定期检查连接状态
-                    if self.client and self.is_connected:
+                    if self.client and self.is_connected and not self._pipe_closed:
                         if not self.client.is_connected:
                             self.is_connected = False
                             self.log("设备连接已断开", "WARNING")
@@ -422,12 +462,22 @@ class BLEService:
                             })
 
                 except Exception as e:
-                    self.log(f"命令处理错误: {e}", "ERROR")
+                    if not self._pipe_closed:
+                        self.log(f"命令处理错误: {e}", "ERROR")
 
         finally:
             stdin_task.cancel()
+            try:
+                await stdin_task
+            except asyncio.CancelledError:
+                pass
+
+            # [FIX] 静默断开连接
+            self._shutting_down = True
             await self.disconnect()
-            self.log("BLE服务已停止", "INFO")
+
+            if not self._pipe_closed:
+                self.log("BLE服务已停止", "INFO")
 
 
 def main():
@@ -442,17 +492,26 @@ def main():
     try:
         asyncio.run(service.run())
     except KeyboardInterrupt:
-        print(json.dumps({
-            "type": "log",
-            "level": "INFO",
-            "message": "BLE服务被用户中断"
-        }), flush=True)
+        # [FIX] 键盘中断时也检查管道状态
+        if not service._pipe_closed:
+            try:
+                print(json.dumps({
+                    "type": "log",
+                    "level": "INFO",
+                    "message": "BLE服务被用户中断"
+                }), flush=True)
+            except:
+                pass
+    except (OSError, IOError, BrokenPipeError):
+        # [FIX] 管道错误静默退出，不弹窗
+        pass
     except Exception as e:
-        print(json.dumps({
-            "type": "error",
-            "message": f"BLE服务异常: {str(e)}"
-        }), flush=True)
-        traceback.print_exc()
+        # [FIX] 其他异常写入stderr而不是stdout
+        try:
+            sys.stderr.write(f"BLE服务异常: {str(e)}\n")
+            traceback.print_exc(file=sys.stderr)
+        except:
+            pass
 
 
 if __name__ == "__main__":
