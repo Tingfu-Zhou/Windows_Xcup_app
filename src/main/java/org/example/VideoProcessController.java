@@ -198,6 +198,10 @@ public class VideoProcessController {
     private static final long LEVEL_STABLE_MS   = 0;     // 新档位短稳确认
     private static final long LEVEL_MIN_DUR_MS  = 0;    // 生效档位最小驻留（≈2 tick）
 
+    /* ---------------------------- 其他补充 ---------------------------- */
+    // 防止重复 close（避免 OrtSession 被二次关闭）
+    private final java.util.concurrent.atomic.AtomicBoolean closed = new java.util.concurrent.atomic.AtomicBoolean(false);
+
     /* ---------------------------- 构造与启动 ---------------------------- */
 
     /**
@@ -1344,21 +1348,49 @@ public class VideoProcessController {
 
     /* ---------------------------- 资源关闭 ----------------------------- */
     public void close() {
+        // 幂等：只允许执行一次
+        if (!closed.compareAndSet(false, true)) {
+            log("close() ignored: already closed");
+            return;
+        }
+
         // 重置蓝牙状态管理器，确保清空所有状态
         resetBluetoothStateManager();
         
         if (videoLoopFuture != null) videoLoopFuture.cancel(true);
         if (audioLoopFuture != null) audioLoopFuture.cancel(true);
         if (fusionLoopFuture != null) fusionLoopFuture.cancel(true);
+
         scheduler.shutdownNow();
-        if (mediaPlayer != null) mediaPlayer.dispose();
-        if (frameExtractor != null) frameExtractor.close();
-        if (audioDecoder != null) audioDecoder.stop();
-        if (inferenceHelper != null) inferenceHelper.close();
-        if (audioHelper != null) audioHelper.close();
-        
+
+        if (mediaPlayer != null) {
+            mediaPlayer.dispose();
+            mediaPlayer = null; // 防止后续误用
+        }
+
+        if (frameExtractor != null) {
+            frameExtractor.close();
+            frameExtractor = null;
+        }
+
+        if (audioDecoder != null) {
+            audioDecoder.stop();
+            audioDecoder = null;
+        }
+
+        if (inferenceHelper != null) {
+            inferenceHelper.close();
+            inferenceHelper = null; //关键：避免后续重复 close
+        }
+
+        if (audioHelper != null) {
+            audioHelper.close();
+            audioHelper = null;
+        }
+
         log("VideoProcessController 已完全关闭，所有资源和状态已清理");
     }
+
 
 
     public Runnable getOnBack() {

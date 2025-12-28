@@ -239,7 +239,9 @@ public class Main extends Application {
         primaryStage.setScene(mainScene);
         primaryStage.setTitle("X姬 – 主菜单");
 
-        UpdateCheckerWin.checkForUpdates(primaryStage);
+        // 清掉 VideoProcessController 设置的 onCloseRequest，避免退出时回调到旧控制器
+        primaryStage.setOnCloseRequest(null);
+        // UpdateCheckerWin.checkForUpdates(primaryStage);
     }
     
     /**
