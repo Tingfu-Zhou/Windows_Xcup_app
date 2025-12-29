@@ -316,10 +316,15 @@ tasks.create<Copy>("prepareDistribution") {
     // 复制资源文件（仅包含实际使用的模型与图标）
     from("src/main/resources") {
         include("icon.ico")
-        include("models/yolov8-pose.onnx")
-        include("models/stgcnpp.onnx")
-        include("models/yamnet.onnx")
-        include("models/yamnet_finetuned.onnx")
+        //include("models/yolov8-pose.onnx")
+        //include("models/stgcnpp.onnx")
+        //include("models/yamnet.onnx")
+        //include("models/yamnet_finetuned.onnx")
+        // [模型加密] 打包加密后的模型
+        include("models/yolov8-pose.onnx.enc")
+        include("models/stgcnpp.onnx.enc")
+        include("models/yamnet.onnx.enc")
+        include("models/yamnet_finetuned.onnx.enc")
         include("ble_service.py")  // BLE Python 服务脚本
         into("resources")
     }

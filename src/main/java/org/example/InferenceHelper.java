@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.awt.Color;
+import java.security.GeneralSecurityException;
 
 /**
  * Windows 桌面端 Inference 帮助类：
@@ -129,12 +130,20 @@ public class InferenceHelper {
 
     // 新增辅助方法：从 classpath 加载模型字节
     private byte[] loadModelBytes(String resourcePath) throws IOException {
+        try {
+            // [模型加密] 统一走加密加载：如果存在同名 .enc 则自动解密，否则读明文资源
+            return ModelCryptoUtil.loadModelBytes(resourcePath);
+        } catch (GeneralSecurityException e) {
+            throw new IOException("Failed to decrypt model: " + resourcePath, e);
+        }
+        /*
         try (InputStream is = getClass().getClassLoader().getResourceAsStream(resourcePath)) {
             if (is == null) {
                 throw new IOException("Model not found in resources: " + resourcePath);
             }
             return is.readAllBytes();
         }
+         */
     }
 
     /* ======================================================================

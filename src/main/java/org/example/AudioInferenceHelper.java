@@ -9,6 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Collections;
 import java.util.Objects;
+import java.security.GeneralSecurityException;
 
 /**
  * AudioInferenceHelper (Windows / ONNX Runtime)
@@ -124,12 +125,20 @@ public class AudioInferenceHelper {
         Path p = Path.of(pathOrResource);
         if (Files.exists(p)) return Files.readAllBytes(p);
 
+        // ② 尝试从 classpath 资源读取（[模型加密] 支持 .enc 自动解密）
+        try {
+            return ModelCryptoUtil.loadModelBytes(pathOrResource);
+        } catch (GeneralSecurityException e) {
+            throw new IOException("Failed to decrypt audio model: " + pathOrResource, e);
+        }
+        /*
         // ② 尝试从 classpath 资源读取
         try (InputStream is = Objects.requireNonNull(
                 AudioInferenceHelper.class.getClassLoader().getResourceAsStream(pathOrResource),
                 "Audio model file not found: " + pathOrResource)) {
             return is.readAllBytes();
         }
+        */
     }
 
     private static String name(OrtSession s) {
