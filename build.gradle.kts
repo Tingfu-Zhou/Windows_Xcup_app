@@ -20,6 +20,11 @@ repositories {
     mavenCentral()
 }
 
+// -------------------- 代码混淆（ProGuard） --------------------
+// [ADD] ProGuard 依赖（用于 JVM 字节码混淆）
+val proguardVersion = "7.5.0"
+configurations.create("proguard")
+
 dependencies {
     testImplementation(platform("org.junit:junit-bom:5.10.0"))
     testImplementation("org.junit.jupiter:junit-jupiter")
@@ -42,6 +47,7 @@ dependencies {
     implementation("org.openjfx:javafx-controls:17.0.12")
     implementation("org.openjfx:javafx-fxml:17.0.12")
     implementation("org.openjfx:javafx-swing:17.0.12")
+    "proguard"("com.guardsquare:proguard-base:$proguardVersion")  // [ADD] ProGuard
 }
 
 javafx {
@@ -280,13 +286,78 @@ tasks.register<Exec>("pyBuild") {
 }
 
 // 创建分发任务
+// -------------------- 代码混淆（ProGuard）任务定义 --------------------
+// [ADD] 说明：将 build/libs/Xcup-{version}.jar 混淆输出到 build/obf/，并在分发阶段使用混淆产物
+val appNameForObf = "Xcup"  // 如需改应用名，请与 applicationName 保持一致
+val obfDir = layout.buildDirectory.dir("obf")
+val obfJar = obfDir.map { it.file("${appNameForObf}-${version}-obf.jar") }
+val mappingFile = obfDir.map { it.file("mapping.txt") }
+
+val runtimeCpForObf = configurations.getByName("runtimeClasspath")  // [ADD]
+
+// JDK jmods（给 ProGuard 作为 libraryjars，避免误删 JDK 类）
+val jmodsDirForObf = file("${System.getProperty("java.home")}/jmods")
+val jmodFilesForObf = jmodsDirForObf.listFiles { f -> f.extension == "jmod" }?.toList() ?: emptyList()
+
+tasks.register<JavaExec>("proguardRelease") {
+    dependsOn(tasks.jar)  // [ADD] 先产出未混淆的主 jar
+    classpath = configurations.getByName("proguard")
+    mainClass.set("proguard.ProGuard")
+
+    doFirst {
+        obfDir.get().asFile.mkdirs()
+
+        val inJar = tasks.jar.get().archiveFile.get().asFile
+        val outJar = obfJar.get().asFile
+        val mapFile = mappingFile.get().asFile
+
+        // 生成 ProGuard 参数文件（避免命令行过长/转义问题）
+        val argFile = file("${obfDir.get().asFile}/proguard-args.txt")
+        val lines = mutableListOf<String>()
+
+        lines += "-verbose"
+        lines += "-injars ${inJar.absolutePath}"
+        lines += "-outjars ${outJar.absolutePath}"
+
+        // 规则文件（请确保项目根目录存在 proguard-rules.pro）
+        lines += "@${file("proguard-rules.pro").absolutePath}"
+
+        // 输出 mapping
+        lines += "-printmapping ${mapFile.absolutePath}"
+
+        // 作为 libraryjars：运行时依赖 + JDK jmods
+        runtimeCpForObf.files.forEach { f ->
+            lines += "-libraryjars ${f.absolutePath}"
+        }
+        jmodFilesForObf.forEach { f ->
+            lines += "-libraryjars ${f.absolutePath}"
+        }
+
+        // 写入参数文件
+        argFile.writeText(lines.joinToString(System.lineSeparator()), Charsets.UTF_8)
+
+        // ProGuard 以 @argsfile 形式读取
+        args("@${argFile.absolutePath}")
+
+        println("[ProGuard] in : ${inJar.absolutePath}")
+        println("[ProGuard] out: ${outJar.absolutePath}")
+        println("[ProGuard] map: ${mapFile.absolutePath}")
+    }
+
+    // 给混淆更大的堆，避免 OOM（可按需调大）
+    jvmArgs("-Xms256m", "-Xmx2g")
+}
+
+
 tasks.create<Copy>("prepareDistribution") {
-    dependsOn("build", "copyNativeLibs", "pyBuild")  // 添加 pyBuild 依赖
+    dependsOn("build", "copyNativeLibs", "pyBuild", "proguardRelease")  // [MOD] 增加混淆产物  // 添加 pyBuild 依赖
 
     val distDir = layout.buildDirectory.dir("dist/Xcup")
 
-    // 复制主 JAR
-    from(tasks.jar)
+    // 复制主 JAR（使用混淆后的产物）
+    from(obfJar) {  // [MOD]
+        rename { "Xcup-${version}.jar" }
+    }
     into(distDir)
 
     // 复制所有依赖（包括 JavaFX）
