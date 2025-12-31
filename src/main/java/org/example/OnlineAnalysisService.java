@@ -77,12 +77,22 @@ public class OnlineAnalysisService {
     private final String[] audioClasses = {"do", "oral", "Noise"};
     
     // 节律估计器（对齐离线模式）
+    /*
     private final AudioRhythmEstimator audioRhythmEstimator = new AudioRhythmEstimator(16_000);
     private volatile float latestAudioRhythmHz = Float.NaN;
     private volatile float latestAudioRhythmConf = 0f;
     private volatile long  latestAudioRhythmTsMs = 0L;
     private volatile boolean latestAudioRhythmValid = false;
-    
+    */
+    /* ---------------------------- [MOD] Loudness 档位估计（替代音频节律） ---------------------------- */
+    private final AudioLoudnessLevelEstimator loudnessEstimator = new AudioLoudnessLevelEstimator(16_000); // [ADD]
+
+    // [ADD] 音频“响度档位”输出（0..9）
+    private volatile int   latestAudioLoudLevel = 0;     // [ADD]
+    private volatile float latestAudioLoudConf  = 0f;    // [ADD]
+    private volatile long  latestAudioLoudTsMs  = 0L;    // [ADD]
+    private volatile boolean latestAudioLoudValid = false; // [ADD]
+
     private final VideoRhythmEstimator videoRhythmEstimator = new VideoRhythmEstimator();
     private volatile float latestVideoFreqHz = Float.NaN;
     private volatile float latestVideoFreqConf = 0f;
@@ -434,12 +444,20 @@ public class OnlineAnalysisService {
         stgcnStrideCountdown = 0; // 拖动/seek 后立即允许重新推理
 
         // 重置节律估计器（音频 + 视频）
+        /*
         audioRhythmEstimator.reset();
         latestAudioRhythmHz = Float.NaN;
         latestAudioRhythmConf = 0f;
         latestAudioRhythmTsMs = 0L;
         latestAudioRhythmValid = false;
-        
+        */
+        // [12.30] reset loudness estimator & outputs
+        loudnessEstimator.reset();
+        latestAudioLoudLevel = 0;
+        latestAudioLoudConf  = 0f;
+        latestAudioLoudTsMs  = 0L;
+        latestAudioLoudValid = false;
+
         videoRhythmEstimator.reset();
         latestVideoFreqHz = Float.NaN;
         latestVideoFreqConf = 0f;
@@ -574,7 +592,8 @@ public class OnlineAnalysisService {
             if (pcm == null) {
                 return;
             }
-            
+
+            /*
             // === 节律估计：每 ~1 秒推送一次 16k 采样，并在预热(4s)后估计 ===
             float[] last1s = pcmBuffer.getLatestData(16_000);
             if (last1s != null && last1s.length > 0) {
@@ -590,7 +609,24 @@ public class OnlineAnalysisService {
                         rr.valid, rr.frequencyHz, rr.confidence));
             }
             // === 节律估计结束 ===
-            
+            */
+
+            // **************[MOD] 音频 Loudness → 档位分析（替代频率估计）**************
+            float[] last1s = pcmBuffer.getLatestData(8_000); // 0.5秒, 16 kHz/s
+            if (last1s != null && last1s.length > 0) {
+                loudnessEstimator.push(last1s);
+                AudioLoudnessLevelEstimator.Result lr = loudnessEstimator.estimate(System.currentTimeMillis());
+
+                latestAudioLoudLevel = lr.level;
+                latestAudioLoudConf  = lr.confidence;
+                latestAudioLoudTsMs  = lr.timestampMs;
+                latestAudioLoudValid = lr.valid;
+
+                log(String.format("[Loudness] valid=%s, level=%d, conf=%.2f, db=%.1f",
+                        lr.valid, lr.level, lr.confidence, lr.db));
+            }
+            // **********************************************************************
+
             // 音频分类推理
             float[] audioProbs = audioHelper.predictProbs(pcm);
             if (audioProbs == null) {
@@ -675,11 +711,17 @@ public class OnlineAnalysisService {
         String finalAction = decisionFusion();
         
         // 第五步：读取音视频节律并融合为最终档位（对齐离线模式）
+        /*
         float audioFreq = latestAudioRhythmHz;
         float audioFreqConf = latestAudioRhythmConf;
         long audioFreqTs = latestAudioRhythmTsMs;
         boolean audioFreqValid = latestAudioRhythmValid;
-        
+        */
+        float audioFreq = (float) latestAudioLoudLevel;   // 用 level 伪装成 “audioFreq”
+        float audioFreqConf = latestAudioLoudConf;
+        long audioFreqTs = latestAudioLoudTsMs;
+        boolean audioFreqValid = latestAudioLoudValid;
+
         float videoFreq = latestVideoFreqHz;
         float videoFreqConf = latestVideoFreqConf;
         long videoFreqTs = latestVideoFreqTsMs;
@@ -721,17 +763,19 @@ public class OnlineAnalysisService {
      */
     private int computeFinalFreq(float audioFreq, float audioFreqConf, float videoFreq, float videoFreqConf) {
         // 临时采用音频节律作为最终节律
-        int finalFreq = mapFreqToLevel(audioFreq);
+        // int finalFreq = mapFreqToLevel(audioFreq);
         int videoFre = mapFreqToLevel(videoFreq);
+
+        int finalFreq = clampLevelFromLoudness(audioFreq); // [MOD] audioFreq 实际是 level(float)
 
         // === 12.12: 方向性置信度门控（涨档更严格，降档更宽松） ===
         {
             float conf = audioFreqConf;      // 当前这帧的置信度
 
             // 三个可调参数
-            final float CONF_IGNORE = 0.12f;  // 极低置信度：整体忽略本次节律
-            final float CONF_UP     = 0.35f;  // 涨档所需置信度（更严格）
-            final float CONF_DOWN   = 0.20f;  // 降档所需置信度（相对宽松）
+            final float CONF_IGNORE = 0.10f;  // 极低置信度：整体忽略本次节律
+            final float CONF_UP     = 0.10f;  // 涨档所需置信度（更严格）
+            final float CONF_DOWN   = 0.10f;  // 降档所需置信度（相对宽松）
 
             int curLevel       = currentLevel;  // 当前已生效档位（0..10）
             int candidateLevel = finalFreq;     // 本次根据 audioFreq 映射出来的档位
@@ -905,8 +949,16 @@ public class OnlineAnalysisService {
         }
         return 9; // 超出则钳到最高档
     }
-    
-    
+
+    // [12.30] audioFreq 实际承载的是 loudness level（float），这里做 0..9 钳制
+    private static int clampLevelFromLoudness(final float levelLike) {
+        if (Float.isNaN(levelLike)) return 0;
+        int lv = Math.round(levelLike);
+        if (lv < 0) lv = 0;
+        if (lv > 9) lv = 9;
+        return lv;
+    }
+
     /**
      * 蓝牙发送状态管理器（对齐离线模式）
      */
