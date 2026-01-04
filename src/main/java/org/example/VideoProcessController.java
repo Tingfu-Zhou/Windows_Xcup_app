@@ -4,6 +4,7 @@ import javafx.application.Platform;
 import javafx.beans.property.BooleanProperty;
 import javafx.beans.property.SimpleBooleanProperty;
 import javafx.geometry.Insets;
+import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
@@ -13,6 +14,7 @@ import javafx.scene.input.MouseButton;
 import javafx.scene.input.MouseEvent;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
+import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 import javafx.scene.media.Media;
 import javafx.scene.media.MediaPlayer;
@@ -75,6 +77,26 @@ public class VideoProcessController {
     private final Button btnFullscreen = new Button("⛶");
     private Slider slider;           // 进度条
     private Button btnPlayPause;     // ▶ / Ⅱ
+
+    // [ADD] 显示播放时间：current / total
+    private Label lbTime;
+
+    // [ADD] 缓存总时长，避免频繁取 Duration
+    private volatile long totalDurationMs = 0;
+
+    // [ADD] 毫秒 -> mm:ss 或 HH:mm:ss
+    private static String formatMs(long ms) {
+        if (ms < 0) ms = 0;
+        long totalSec = ms / 1000;
+        long s = totalSec % 60;
+        long m = (totalSec / 60) % 60;
+        long h = totalSec / 3600;
+        if (h > 0) {
+            return String.format("%d:%02d:%02d", h, m, s);
+        }
+        return String.format("%02d:%02d", m, s);
+    }
+
 
     /* ---------------------------- 多媒体核心 ---------------------------- */
     private MediaPlayer mediaPlayer;
@@ -290,11 +312,20 @@ public class VideoProcessController {
         /* ---------- 媒体控制栏 ---------- */
         btnPlayPause = new Button("Ⅱ");            // 初始假定自动播放
         slider       = new Slider(0, 100, 0);      // 最大值稍后绑定总时长, totalDuration 出来后，再更新 slider 最大值
-        slider.setPrefWidth(400);
+        // slider.setPrefWidth(400);
+        // [ADD] 让 slider 在 HBox 里自动拉伸占满剩余空间
+        slider.setMaxWidth(Double.MAX_VALUE);
+        HBox.setHgrow(slider, Priority.ALWAYS);
+
+        // [ADD] 时间显示：00:00 / 00:00
+        lbTime = new Label("00:00 / 00:00");
+        lbTime.setMinWidth(110);         // 防止太窄挤压抖动（你也可以调大一点）
+        lbTime.setAlignment(Pos.CENTER_RIGHT);
 
         VBox controlBarWrapper = new VBox();  // ⚠️ 这个 VBox 放到底部
-        HBox controlBar = new HBox(10, btnPlayPause, slider);
+        HBox controlBar = new HBox(10, btnPlayPause, slider, lbTime);   // [MOD] 把 lbTime 加进去
         controlBar.setPadding(new Insets(5));
+        controlBar.setAlignment(Pos.CENTER_LEFT); // [ADD] 视觉更稳定
         controlBarWrapper.getChildren().add(controlBar);
         root.setBottom(controlBarWrapper); // overlay + 控制栏
 
@@ -423,6 +454,12 @@ public class VideoProcessController {
         /* ── totalDuration 出来后，更新 slider 最大值 ── */
         mediaPlayer.totalDurationProperty().addListener((o,oldDur,newDur) -> {
             slider.setMax(newDur.toMillis());
+            // [ADD] 缓存总时长 + 刷新时间显示
+            totalDurationMs = (long) newDur.toMillis();
+            if (lbTime != null) {
+                long curMs = (long) mediaPlayer.getCurrentTime().toMillis();
+                lbTime.setText(formatMs(curMs) + " / " + formatMs(totalDurationMs));
+            }
         });
 
         /* ── 播放时更新 slider ── */
@@ -430,6 +467,13 @@ public class VideoProcessController {
             if (!slider.isValueChanging()) {           // 只有用户没在拖动时同步
                 slider.setValue(newT.toMillis());
             }
+
+            // [ADD] 实时刷新时间显示
+            if (lbTime != null) {
+                long curMs = (long) newT.toMillis();
+                lbTime.setText(formatMs(curMs) + " / " + formatMs(totalDurationMs));
+            }
+
             // 拖动检测（保留原逻辑）
             if (Math.abs(newT.subtract(oldT).toMillis()) > 500) {  // 简易防抖：500 ms 以上认定为用户 seek
                 onUserSeek((long) newT.toMillis());
