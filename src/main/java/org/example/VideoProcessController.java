@@ -601,6 +601,14 @@ public class VideoProcessController {
                         actionClass = "do";
                         bestScore = 1.0f - bestScore;
                     }
+
+                    /* 判断为noise的情况时，将其对应的置信度设为0。
+                    这样，视频分析线程分析所得的“noise”在后续的决策窗口中就会因为置信度为0的缘故变为 0.
+                    (等价于null，不参与决策) */
+                    if ("Noise".equals(actionClass)) {
+                        actionClass = "Noise";
+                        bestScore = 0.0f;
+                    }
                     
                     // 更新最新的视频分析结果（原子操作，线程安全）
                     latestVideoAction = actionClass;
@@ -1172,8 +1180,9 @@ public class VideoProcessController {
 
     // 门控——是否属于做爱大类/是否允许变速（按你 Windows 的动作命名规则改）
     private static boolean isSexAction(String action) {
-        // 示例：你这里 audioClasses = {"do","oral","Noise"}，video/action 也常见 "do"
-        return "do".equalsIgnoreCase(action) || "sex".equalsIgnoreCase(action);
+        return "do".equalsIgnoreCase(action)
+                || "oral".equalsIgnoreCase(action)   // [ADD]
+                || "sex".equalsIgnoreCase(action);
     }
     private boolean currentStateSupportsSpeed() {
         // 如需限制某些模式固定速度，可在这里判断 currentBluetoothState
@@ -1189,8 +1198,8 @@ public class VideoProcessController {
     private void managedBluetoothUpdate(String finalAction, int finalFreq) {
         long currentTime = System.currentTimeMillis();
         
-        // 忽略空动作或Noise
-        if (finalAction == null || finalAction.isEmpty() || "Noise".equals(finalAction)) {
+        // 仅忽略空动作；Noise 需要进入状态机用于“停止/不转”
+        if (finalAction == null || finalAction.isEmpty()) {
             return;
         }
         
@@ -1248,7 +1257,13 @@ public class VideoProcessController {
         
         // 第二层：检查稳定确认时间
         long pendingDuration = currentTime - pendingStateStartTime;
-        if (pendingDuration < STABILITY_CONFIRM_TIME_MS) {
+        // [ADD] 动作稳定确认时间：默认 1600ms；若从目标动作(do/oral)切到 Noise，则延长到 2400ms
+        long actionStableMs = STABILITY_CONFIRM_TIME_MS;
+        if (isSexAction(currentBluetoothState) && "Noise".equals(pendingBluetoothState)) {
+            actionStableMs = 2400;
+        }
+        // [MOD] 使用动态稳定确认时间
+        if (pendingDuration < actionStableMs) {
             // 动作还未稳定足够时间，继续等待
             return;
         }
