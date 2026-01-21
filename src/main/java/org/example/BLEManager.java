@@ -728,9 +728,9 @@ public class BLEManager {
     private byte[] buildFrameForActionWithLevel(String action, byte intLevel) {
         switch (action) {
             case "oral":
-                return buildSetPatternFrame(PATTERN_1, intLevel, 2000, (byte)0);
+                return buildSetPatternFrame(PATTERN_1, intLevel, 0, (byte)1);
             case "do":
-                return buildSetPatternFrame(PATTERN_1, intLevel, 2000, (byte)0);
+                return buildSetPatternFrame(PATTERN_1, intLevel, 0, (byte)1);
             case "Noise":
                 return buildStopAllFrame();
             default:
