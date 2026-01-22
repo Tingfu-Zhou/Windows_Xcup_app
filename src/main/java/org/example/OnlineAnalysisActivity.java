@@ -11,7 +11,7 @@ import javafx.stage.StageStyle;
 /**
  * 在线分析活动
  * 提供悬浮窗界面显示实时分析结果
- * 相当于Android版本的OnlineAnalysisActivity
+ * 相当于Android版本的OnlineAnalysisService
  */
 public class OnlineAnalysisActivity {
     

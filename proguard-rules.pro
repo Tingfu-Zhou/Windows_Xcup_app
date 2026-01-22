@@ -11,6 +11,27 @@
 -keepattributes *Annotation*,Signature,InnerClasses,EnclosingMethod,Exceptions,Record,StackMap,StackMapTable,SourceFile,LineNumberTable,LocalVariableTable,LocalVariableTypeTable
 -renamesourcefileattribute SourceFile
 
+# =========================
+# JNI / WASAPI 回调：禁止混淆/裁剪
+# =========================
+
+# 1) 保留类名不变（native 常用 FindClass("org/example/PureWasapiAudioCapture")）
+-keep class org.example.PureWasapiAudioCapture
+
+# 2) 保留 JNI 回调方法名与签名不变（native 通过 GetMethodID 调它）
+-keepclassmembers class org.example.PureWasapiAudioCapture {
+    private void onNativePcmData(byte[], int);
+}
+
+# 3) 保留所有 native 方法（防止被 shrink 掉或签名被改）
+-keepclasseswithmembers class org.example.PureWasapiAudioCapture {
+    native <methods>;
+}
+
+# 4) 保留内部回调接口（避免被改名/裁剪）
+-keep class org.example.PureWasapiAudioCapture$AudioDataCallback { *; }
+
+
 # ---------- Kotlin 反射/元数据 ----------
 -keep class kotlin.** { *; }                    # Kotlin 标准库
 -keep class kotlinx.** { *; }

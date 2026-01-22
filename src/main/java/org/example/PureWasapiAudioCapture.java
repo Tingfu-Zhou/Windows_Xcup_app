@@ -16,6 +16,7 @@ public class PureWasapiAudioCapture {
 
     private static final int TARGET_SAMPLE_RATE = 16000;
     private static final int TARGET_CHANNELS = 1;
+    private long cbCount = 0;
 
     static {
         // 优先从当前目录加载 DLL，失败再尝试按库名加载
@@ -133,6 +134,10 @@ public class PureWasapiAudioCapture {
     // 被JNI调用，将PCM数据回调到Java
     @SuppressWarnings("unused")
     private void onNativePcmData(byte[] data, int length) {
+        cbCount++;
+        if (cbCount % 200 == 0) {
+            System.out.println("[WASAPI-JNI] callback ok, length=" + length + ", count=" + cbCount);
+        }
         AudioDataCallback callback = this.audioCallback;
         if (callback != null && length > 0) {
             callback.onAudioData(data, length);

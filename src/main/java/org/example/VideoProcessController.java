@@ -32,6 +32,8 @@ import java.net.URI;
 import java.nio.file.Path;
  
 import java.util.ArrayDeque;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -794,20 +796,10 @@ public class VideoProcessController {
         if ("oral".equals(audioAction)) {
             audioAction = "do";
         }
-        
-        // 第三步：添加当前记录到历史窗口
-        synchronized (historyLock) {
-            actionHistory.addLast(new ActionRecord(currentTime, videoAction, audioAction, videoConf, audioConf));
-            
-            // 保持窗口大小，删除过旧的记录
-            while (actionHistory.size() > DECISION_WINDOW_SIZE) {
-                actionHistory.removeFirst();
-            }
-        }
-        
-        // 第四步：使用决策函数获取最终动作
-        String finalAction = decisionFusion();
-        
+
+        // [MOD] 第三/四步：对齐 Android —— 由 smoothedFusion 自己维护历史并输出 finalAction
+        String finalAction = smoothedFusion(videoAction, audioAction, videoConf, audioConf);
+
         // 第五步：读取音视频节律并融合为最终档位（对齐 Android）
         // 读取音频节律
         /*
@@ -908,109 +900,116 @@ public class VideoProcessController {
     /* ------------------------------------------------------------------ */
     /*                             决策融合函数                             */
     /* ------------------------------------------------------------------ */
-    
-    /**
-     * 核心决策融合函数 - 使用时间窗口平滑策略和加权评分算法
-     * @return 融合后的最终动作
-     */
-    private String decisionFusion() {
+
+    // =========================
+    // [ADD] Android 对齐版：决策窗口平滑融合（smoothedFusion）
+    // 目的：让 Windows finalAction 决策逻辑与 Android smoothedFusion/selectBestAction 看齐
+    // =========================
+    private String smoothedFusion(String videoAction, String audioAction, float videoConf, float audioConf) {
         synchronized (historyLock) {
-            // 如果历史记录不足，使用简单决策逻辑
-            if (actionHistory.size() < MIN_OCCURRENCE_THRESHOLD) {
-                return simpleDecision();
+            // [ADD] 由 smoothedFusion 自己维护历史（对齐 Android）
+            actionHistory.addLast(new ActionRecord(System.currentTimeMillis(),
+                    videoAction == null ? "" : videoAction,
+                    audioAction == null ? "" : audioAction,
+                    videoConf,
+                    audioConf));
+
+            while (actionHistory.size() > DECISION_WINDOW_SIZE) {
+                actionHistory.removeFirst();
             }
-            
-            // 统计所有有效动作的加权得分
-            java.util.Map<String, Float> audioScores = new java.util.HashMap<>();
-            java.util.Map<String, Float> videoScores = new java.util.HashMap<>();
-            java.util.Map<String, Integer> actionCounts = new java.util.HashMap<>();
-            
+
+            if (actionHistory.size() < 3) {
+                return selectBestAction(videoAction, audioAction, videoConf, audioConf);
+            }
+
+            Map<String, Float> actionScores = new HashMap<>();
+            Map<String, Integer> actionCounts = new HashMap<>();
+
+            int index = 0;
             int windowSize = actionHistory.size();
-            
-            for (int i = 0; i < windowSize; i++) {
-                ActionRecord record = actionHistory.get(i);
-                
-                // 计算时间递增权重：越新的数据权重越高
-                float timeWeight = (float)(i + 1) / windowSize;
-                
-                // 处理音频动作
-                if (record.audioAction != null && !record.audioAction.isEmpty() && 
-                    !record.audioAction.equals("Noise") && record.audioConfidence > 0) {
-                    
-                    float audioScore = record.audioConfidence * timeWeight * AUDIO_WEIGHT_FACTOR;
-                    audioScores.put(record.audioAction, audioScores.getOrDefault(record.audioAction, 0f) + audioScore);
-                    actionCounts.put(record.audioAction, actionCounts.getOrDefault(record.audioAction, 0) + 1);
+
+            for (ActionRecord record : actionHistory) {
+                float weight = (float) (index + 1) / windowSize;
+
+                // 视频：过滤 Background（对齐 Android）
+                if (record.videoAction != null && !record.videoAction.isEmpty()
+                        && !"Background".equals(record.videoAction)) {
+                    String key = record.videoAction;
+                    float score = actionScores.getOrDefault(key, 0f);
+                    score += record.videoConfidence * weight * VIDEO_WEIGHT_FACTOR; // 0.7
+                    actionScores.put(key, score);
+                    actionCounts.put(key, actionCounts.getOrDefault(key, 0) + 1);
                 }
-                
-                // 处理视频动作
-                if (record.videoAction != null && !record.videoAction.isEmpty() && 
-                    !record.videoAction.equals("Noise") && record.videoConfidence > 0) {
-                    
-                    float videoScore = record.videoConfidence * timeWeight * VIDEO_WEIGHT_FACTOR;
-                    videoScores.put(record.videoAction, videoScores.getOrDefault(record.videoAction, 0f) + videoScore);
-                    actionCounts.put(record.videoAction, actionCounts.getOrDefault(record.videoAction, 0) + 1);
+
+                // 音频：不强制过滤 Noise（对齐 Android：计分阶段允许 Noise 进入，最终由出现次数/回退策略处理）
+                if (record.audioAction != null && !record.audioAction.isEmpty()) {
+                    String key = record.audioAction;
+                    float score = actionScores.getOrDefault(key, 0f);
+                    score += record.audioConfidence * weight * AUDIO_WEIGHT_FACTOR; // 1.3
+                    actionScores.put(key, score);
+                    actionCounts.put(key, actionCounts.getOrDefault(key, 0) + 1);
                 }
+
+                index++;
             }
-            
-            // 噪声过滤：最小出现次数阈值
-            java.util.Map<String, Float> finalScores = new java.util.HashMap<>();
-            
-            // 融合优先级：音频结果 > 视频结果
-            for (String action : actionCounts.keySet()) {
-                if (actionCounts.get(action) >= MIN_OCCURRENCE_THRESHOLD) {
-                    float totalScore = audioScores.getOrDefault(action, 0f) + videoScores.getOrDefault(action, 0f);
-                    if (totalScore > 0) {
-                        finalScores.put(action, totalScore);
-                    }
-                }
-            }
-            
-            // 选择得分最高的动作
-            if (finalScores.isEmpty()) {
-                return "Noise";
-            }
-            
+
             String bestAction = "";
             float bestScore = 0f;
-            
-            for (java.util.Map.Entry<String, Float> entry : finalScores.entrySet()) {
-                if (entry.getValue() > bestScore) {
-                    bestScore = entry.getValue();
-                    bestAction = entry.getKey();
+
+            for (Map.Entry<String, Float> entry : actionScores.entrySet()) {
+                String action = entry.getKey();
+                float score = entry.getValue();
+                int count = actionCounts.getOrDefault(action, 0);
+
+                if (count >= MIN_OCCURRENCE_THRESHOLD && score > bestScore) {
+                    bestScore = score;
+                    bestAction = action;
                 }
             }
-            
-            return bestAction.isEmpty() ? "Noise" : bestAction;
+
+            if (bestAction.isEmpty()) {
+                ActionRecord latest = actionHistory.getLast();
+                bestAction = selectBestAction(latest.videoAction, latest.audioAction,
+                        latest.videoConfidence, latest.audioConfidence);
+            }
+
+            return bestAction;
         }
     }
-    
-    /**
-     * 简单的动作选择逻辑（用于历史记录不足时）
-     * 音频优先策略，视频作为备选
-     */
-    private String simpleDecision() {
-        String audioAction = latestAudioAction;
-        String videoAction = latestVideoAction;
-        float audioConf = latestAudioConfidence;
-        float videoConf = latestVideoConfidence;
-        
-        // 如果音频是有效动作（非Noise）或音频置信度很高（>0.7f），使用音频
-        if (audioAction != null && !audioAction.isEmpty()) {
-            if (!audioAction.equals("Noise") || audioConf > 0.7f) {
-                return audioAction;
+
+    // =========================
+    // [ADD] Android 对齐版：窗口不足/回退策略（selectBestAction）
+    // 关键差异：两者都空且没有 Noise 时返回 ""（而不是 "Noise"）
+    // =========================
+    private String selectBestAction(String videoAction, String audioAction, float videoConf, float audioConf) {
+        String a = (audioAction == null) ? "" : audioAction;
+        String v = (videoAction == null) ? "" : videoAction;
+
+        // 音频优先
+        if (!a.isEmpty()) {
+            if (!"Noise".equals(a) || audioConf > 0.7f) {
+                return a;
             }
         }
-        
-        // 视频同理
-        if (videoAction != null && !videoAction.isEmpty()) {
-            if (!videoAction.equals("Noise") || videoConf > 0.7f) {
-                return videoAction;
+
+        // 视频次之（过滤 Background）
+        if (!v.isEmpty() && !"Background".equals(v)) {
+            if (!"Noise".equals(v) || videoConf > 0.7f) {
+                return v;
             }
         }
-        
-        // 如果音视频都是Noise，返回Noise
-        return "Noise";
+
+        // 若明确出现 Noise，则输出 Noise
+        if ("Noise".equals(a) || "Noise".equals(v)) {
+            return "Noise";
+        }
+
+        // 否则返回空（对齐 Android：无结论 → 不发蓝牙）
+        return "";
     }
+
+
+
 
     /* ------------------------------------------------------------------ */
     /*                             辅助函数                               */
