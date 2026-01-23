@@ -116,7 +116,7 @@ public class VideoRhythmEstimator {
 
     // ============== 主入口：在姿态回调中调用 ======================
     /**
-     * @param kps    17x3 关键点（x,y,conf），坐标需与你 ST-GCN++ 训练时的 PreNormalize2D 一致（[-1,1]）
+     * @param kps    17x3 关键点（x,y,conf），坐标需与你 ST-GCN++ 训练时的 PreNormalize2D 一致
      * @param ptsMs  当前帧的展示或编码时间戳
      */
     public synchronized void onPoseFrame(float[][] kps, long ptsMs) {

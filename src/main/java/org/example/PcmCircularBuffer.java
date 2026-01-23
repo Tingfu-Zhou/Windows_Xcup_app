@@ -119,6 +119,7 @@ public class PcmCircularBuffer {
      * @param sourceSampleRate 原始采样率
      * @param sourceChannels 原始通道数（1=单声道，2=立体声）
      */
+    /*
     public synchronized void addByteData(byte[] audioData, int sourceSampleRate, int sourceChannels) {
         if (!onlineMode) {
             throw new IllegalStateException("addByteData() only available in online mode");
@@ -159,7 +160,151 @@ public class PcmCircularBuffer {
         // System.out.println(String.format("[PCM-Online] Written %d samples, Audio activity: %s", 
         //                   samples.length, hasActivity ? "Active" : "Silent"));
     }
-    
+    */
+
+    // [ADD] 新接口：带 bitsPerSample
+    public synchronized void addByteData(byte[] audioData, int sourceSampleRate, int sourceChannels, int bitsPerSample) {
+        if (!onlineMode) throw new IllegalStateException("addByteData() only available in online mode");
+
+        if (sourceChannels <= 0) {
+            System.err.println("[PCM] Invalid channel count: " + sourceChannels);
+            return;
+        }
+
+        // 1) bytes -> float (interleaved)
+        float[] interleaved = convertBytesToFloat(audioData, bitsPerSample);
+
+        // 2) downmix -> mono (支持任意声道数)
+        float[] mono = (sourceChannels == 1)
+                ? interleaved
+                : downmixInterleavedToMono(interleaved, sourceChannels);
+
+        // 3) resample -> 16k
+        if (sourceSampleRate != targetSampleRate) {
+            mono = resample(mono, sourceSampleRate, targetSampleRate);
+        }
+        // [ADD] 音频活动检测（用于 hasAudioActivity / 静音逻辑）
+        detectAudioActivity(mono);
+
+        // [ADD] 在写入前
+        if ((System.currentTimeMillis() / 1000) % 5 == 0) {
+            // System.out.println("[PCM-Online] src=" + sourceSampleRate + "Hz, ch=" + sourceChannels
+                    // + ", bits=" + bitsPerSample + ", afterDownmix(monoLen)=" + mono.length);
+        }
+
+        // 4) 写入环形缓冲
+        long currentTime = System.currentTimeMillis();
+        for (int i = 0; i < mono.length; i++) {
+            int index = (writeIndex + i) % capacity;
+            buffer[index] = mono[i];
+            timestamps[index] = currentTime + (i * 1000L / targetSampleRate);
+        }
+        writeIndex = (writeIndex + mono.length) % capacity;
+        if (mono.length >= capacity) isFull = true;
+    }
+
+    // [ADD] 旧接口保持不动，默认 bits=16，避免你其他地方还在用旧签名
+    public synchronized void addByteData(byte[] audioData, int sourceSampleRate, int sourceChannels) {
+        addByteData(audioData, sourceSampleRate, sourceChannels, 16);
+    }
+
+    // [ADD] 任意声道 interleaved downmix -> mono
+    private float[] downmixInterleavedToMono(float[] interleaved, int channels) {
+        int frames = interleaved.length / channels;
+        float[] mono = new float[frames];
+        int idx = 0;
+        for (int f = 0; f < frames; f++) {
+            float sum = 0f;
+            for (int ch = 0; ch < channels; ch++) {
+                sum += interleaved[idx++];
+            }
+            mono[f] = sum / channels;
+        }
+        return mono;
+    }
+
+    // [MOD] 支持 16/24/32-bit（32-bit 先按 float32 解，异常则退回 PCM32）
+    private float[] convertBytesToFloat(byte[] audioData, int bitsPerSample) {
+        switch (bitsPerSample) {
+            case 16: {
+                int n = audioData.length / 2;
+                float[] samples = new float[n];
+                for (int i = 0; i < n; i++) {
+                    int lo = audioData[i * 2] & 0xFF;
+                    int hi = audioData[i * 2 + 1]; // signed
+                    short s = (short) ((hi << 8) | lo);
+                    samples[i] = s / 32768.0f;
+                }
+                return samples;
+            }
+
+            case 24: { // PCM24 little-endian
+                int n = audioData.length / 3;
+                float[] samples = new float[n];
+                for (int i = 0; i < n; i++) {
+                    int b0 = audioData[i * 3] & 0xFF;
+                    int b1 = audioData[i * 3 + 1] & 0xFF;
+                    int b2 = audioData[i * 3 + 2]; // signed for sign-extend
+                    int v = (b2 << 16) | (b1 << 8) | b0;
+                    // sign extend 24->32
+                    if ((v & 0x00800000) != 0) v |= 0xFF000000;
+                    samples[i] = v / 8388608.0f; // 2^23
+                }
+                return samples;
+            }
+
+            case 32: {
+                // 先按 float32 解析（WASAPI Mix Format 最常见）
+                int n = audioData.length / 4;
+                float[] asFloat = new float[n];
+                boolean looksBad = false;
+
+                for (int i = 0; i < n; i++) {
+                    int b0 = audioData[i * 4] & 0xFF;
+                    int b1 = audioData[i * 4 + 1] & 0xFF;
+                    int b2 = audioData[i * 4 + 2] & 0xFF;
+                    int b3 = audioData[i * 4 + 3] & 0xFF;
+                    int bits = (b3 << 24) | (b2 << 16) | (b1 << 8) | b0;
+                    float v = Float.intBitsToFloat(bits);
+                    asFloat[i] = v;
+
+                    // 简单健壮性判断：出现 NaN/Inf 或绝对值过大，认为不是 float32 PCM
+                    if (!Float.isFinite(v) || Math.abs(v) > 4.0f) {
+                        looksBad = true;
+                    }
+                }
+
+                if (!looksBad) {
+                    // clamp 到 [-1,1]（防止偶发略超）
+                    for (int i = 0; i < n; i++) {
+                        float v = asFloat[i];
+                        if (v > 1f) v = 1f;
+                        else if (v < -1f) v = -1f;
+                        asFloat[i] = v;
+                    }
+                    return asFloat;
+                }
+
+                // 退回按 PCM32（signed int32）解析
+                float[] asPcm32 = new float[n];
+                for (int i = 0; i < n; i++) {
+                    int b0 = audioData[i * 4] & 0xFF;
+                    int b1 = audioData[i * 4 + 1] & 0xFF;
+                    int b2 = audioData[i * 4 + 2] & 0xFF;
+                    int b3 = audioData[i * 4 + 3]; // signed
+                    int v = (b3 << 24) | (b2 << 16) | (b1 << 8) | b0;
+                    asPcm32[i] = v / 2147483648.0f; // 2^31
+                }
+                return asPcm32;
+            }
+
+            default:
+                System.err.println("[PCM] Unsupported bitsPerSample: " + bitsPerSample + " (expected 16/24/32)");
+                return new float[0];
+        }
+    }
+
+
     /**
      * 在线模式：获取最新的N个样本
      * @param sampleCount 需要的样本数量

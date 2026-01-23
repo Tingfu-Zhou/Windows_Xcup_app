@@ -110,7 +110,12 @@ public class OnlineAnalysisService {
     // 静音检测
     private volatile long lastAudioActivityTime = 0;                     // 最后一次检测到音频活动的时间
     private volatile boolean hasDetectedInitialAudio = false;            // 是否检测到过音频（避免启动时立即重置）
-    
+
+    // 在线模式音频读取
+    private volatile int wasapiSampleRate = 0;
+    private volatile int wasapiChannels = 0;
+    private volatile int wasapiBitsPerSample = 16;
+
     // 音频推理节流
     private volatile long lastAudioInferMs = 0;
     
@@ -229,15 +234,21 @@ public class OnlineAnalysisService {
             System.err.println("[OnlineAnalysis] Failed to start screen capture: " + e.getMessage());
             return false;
         }
-        
-        // 启动音频捕获
+
+        // [MOD] 启动音频捕获：只调用一次 + 缓存实际格式
         if (audioCapture != null) {
-            if (!audioCapture.startCapture(this::onAudioDataCaptured)) {
+            boolean ok = audioCapture.startCapture(this::onAudioDataCaptured);
+            if (!ok) {
                 System.err.println("[OnlineAnalysis] Failed to start audio capture");
                 return false;
             }
+
+            // [ADD] 缓存 WASAPI 实际格式（供回调使用）
+            wasapiSampleRate = audioCapture.getActualSampleRate();
+            wasapiChannels = audioCapture.getActualChannels();
+            wasapiBitsPerSample = audioCapture.getActualBitsPerSample();
         }
-        
+
         isAnalyzing = true;
         isPaused = false;
         
@@ -364,20 +375,11 @@ public class OnlineAnalysisService {
         try {
             // 只处理有效长度的数据
             if (length > 0) {
-                byte[] validData = new byte[length];
-                System.arraycopy(audioData, 0, validData, 0, length);
-                
-                // 添加到PCM缓冲区，传入实际的音频格式信息
-                // PcmCircularBuffer会自动进行立体声->单声道转换和重采样到16kHz
-                int actualSampleRate = audioCapture.getActualSampleRate();
-                int actualChannels = audioCapture.getActualChannels();
-                
-                if (actualSampleRate > 0 && actualChannels > 0) {
-                    pcmBuffer.addByteData(validData, actualSampleRate, actualChannels);
-                } else {
-                    // 如果格式信息未就绪，使用默认值（通常是48kHz立体声）
-                    pcmBuffer.addByteData(validData, 48000, 2);
-                }
+                // [ADD] 确保只使用有效长度（JNI 有时复用大数组，尾部会脏）
+                byte[] pcmBytes = (length == audioData.length) ? audioData : java.util.Arrays.copyOf(audioData, length);
+
+                // [MOD] 关键：把真实 sr/ch/bits 传给 PcmCircularBuffer
+                pcmBuffer.addByteData(pcmBytes, wasapiSampleRate, wasapiChannels, wasapiBitsPerSample);
                 
                 // 检查音频活动状态
                 boolean hasActivity = pcmBuffer.hasAudioActivity();
@@ -651,6 +653,7 @@ public class OnlineAnalysisService {
                 audioClass = "do";
                 audioProb = 1.0f - audioProb;
             }
+            System.out.println("[Audio] action: " + audioClass + ", conf: " + audioProb);
 
             latestAudioAction = audioClass;
             latestAudioConfidence = audioProb;

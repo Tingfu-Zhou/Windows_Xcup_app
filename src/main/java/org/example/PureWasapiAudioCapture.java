@@ -136,7 +136,7 @@ public class PureWasapiAudioCapture {
     private void onNativePcmData(byte[] data, int length) {
         cbCount++;
         if (cbCount % 200 == 0) {
-            System.out.println("[WASAPI-JNI] callback ok, length=" + length + ", count=" + cbCount);
+            // System.out.println("[WASAPI-JNI] callback ok, length=" + length + ", count=" + cbCount);
         }
         AudioDataCallback callback = this.audioCallback;
         if (callback != null && length > 0) {
