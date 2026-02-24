@@ -268,6 +268,13 @@ public class OnlineAnalysisService {
         }
         
         isAnalyzing = false;
+
+        // ★ 新增：退出在线模式时发送停止信号
+        BLEManager bleManager = BLEManager.globalManager;
+        if (bleManager != null && bleManager.isConnected()) {
+            bleManager.sendAction("Noise", 0);
+            log("[在线模式] 停止分析，已发送停止信号(Noise)");
+        }
         
         // 停止捕获
         if (screenCapture != null) {
@@ -401,6 +408,13 @@ public class OnlineAnalysisService {
                     // 无音频活动
                     if (!isPaused) {
                         pauseAnalysis(true);
+
+                        // ★ 新增：静音时发送停止信号
+                        BLEManager bleManager = BLEManager.globalManager;
+                        if (bleManager != null && bleManager.isConnected() && !bleManager.isPaused()) {
+                            bleManager.sendAction("Noise", 0);
+                            log("[在线模式] 静音检测，已发送停止信号(Noise)");
+                        }
                     }
                     
                     // 静音检测：超过5秒无音频 → 重置所有状态（类似seek）

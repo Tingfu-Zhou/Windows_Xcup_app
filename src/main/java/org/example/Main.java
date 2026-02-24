@@ -110,8 +110,8 @@ public class Main extends Application {
         }
 
         /* --------- 主菜单 UI --------- */
-        Button btnSelectVideo      = new Button("选择本地视频");
-        Button btnOnlineMode       = new Button("在线模式");
+        Button btnSelectVideo      = new Button("本地视频模式");
+        Button btnOnlineMode       = new Button("在线视频模式");
         btnScanConnect = new Button("一键扫描并连接蓝牙设备");
 
         // 设置按钮样式

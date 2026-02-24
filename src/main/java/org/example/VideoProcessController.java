@@ -221,6 +221,10 @@ public class VideoProcessController {
     // 频率档位记录（直接透传 finalFreq）
     private volatile int lastSentLevel = 0;                      // 最近一次已发送档位
 
+    // ★ 新增：暂停时挂起的蓝牙动作与档位
+    private volatile String suspendedBluetoothState = "";
+    private volatile int suspendedLevel = 0;
+
     // =====================[ 频率档位确认与节流相关成员 ]=====================
     // 档位（0..10）确认状态
     private volatile int currentLevel = 0;                 // 已确认生效的档位
@@ -1088,6 +1092,9 @@ public class VideoProcessController {
         
         // 重置蓝牙状态管理器的所有状态
         resetBluetoothStateManager();
+        // ★ 新增：清空挂起状态
+        suspendedBluetoothState = "";
+        suspendedLevel = 0;
         
         // 重置节律估计器与缓存（音频 + 视频）
         /*
@@ -1125,8 +1132,42 @@ public class VideoProcessController {
         return (long) mediaPlayer.getCurrentTime().toMillis();
     }
 
-    private void pauseAnalysis() { analysisPaused.set(true); }
-    private void resumeAnalysis() { analysisPaused.set(false); }
+    private void pauseAnalysis() {
+        analysisPaused.set(true);
+
+        // ★ 新增：挂起当前蓝牙动作并发送停止信号
+        if (!currentBluetoothState.isEmpty() && !"Noise".equals(currentBluetoothState)) {
+            suspendedBluetoothState = currentBluetoothState;
+            suspendedLevel = currentLevel;
+            log("[暂停] 挂起动作: " + suspendedBluetoothState + ", 档位: " + suspendedLevel);
+        }
+        if (bleManager != null && bleManager.isConnected() && !bleManager.isPaused()) {
+            bleManager.sendAction("Noise", 0);
+            log("[暂停] 已发送停止信号(Noise)");
+        }
+    }
+    private void resumeAnalysis() {
+        analysisPaused.set(false);
+
+        // ★ 新增：恢复挂起的蓝牙动作
+        if (!suspendedBluetoothState.isEmpty()) {
+            log("[恢复] 恢复动作: " + suspendedBluetoothState + ", 档位: " + suspendedLevel);
+            currentBluetoothState = suspendedBluetoothState;
+            currentLevel = suspendedLevel;
+            currentStateStartTime = System.currentTimeMillis();
+            currentLevelSinceMs = System.currentTimeMillis();
+
+            if (bleManager != null && bleManager.isConnected() && !bleManager.isPaused()) {
+                bleManager.sendAction(suspendedBluetoothState, suspendedLevel);
+                lastBluetoothSendTime = System.currentTimeMillis();
+                lastSentLevel = suspendedLevel;
+                log("[恢复] 已发送恢复动作: " + suspendedBluetoothState + " 档位: " + suspendedLevel);
+            }
+
+            suspendedBluetoothState = "";
+            suspendedLevel = 0;
+        }
+    }
 
     /**
      * 转换滑动窗口为 ST-GCN++ 输入
@@ -1476,6 +1517,12 @@ public class VideoProcessController {
 
         // 先发“停止请求”，让各循环自行退出（不要靠 interrupt）
         running.set(false);
+
+        // ★ 新增：退出时发送停止信号
+        if (bleManager != null && bleManager.isConnected()) {
+            bleManager.sendAction("Noise", 0);
+            log("[退出] 已发送停止信号(Noise)");
+        }
 
         resetBluetoothStateManager();
 
