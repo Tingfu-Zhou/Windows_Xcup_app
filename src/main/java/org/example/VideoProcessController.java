@@ -145,7 +145,7 @@ public class VideoProcessController {
     private final BLEManager bleManager = BLEManager.globalManager;
 
     /* ---------------------------- 运行时状态 ---------------------------- */
-    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(3);
+    private final ScheduledExecutorService scheduler = Executors.newScheduledThreadPool(5);
     private final BooleanProperty analysisPaused = new SimpleBooleanProperty(false);
     private volatile boolean videoEnded = false;
     private volatile String latestVideoAction = "";
@@ -227,7 +227,7 @@ public class VideoProcessController {
 
     // =====================[ 频率档位确认与节流相关成员 ]=====================
     // 档位（0..10）确认状态
-    private volatile int currentLevel = 0;                 // 已确认生效的档位
+    private volatile int currentLevel = 1;                 // 已确认生效的档位
     private volatile long currentLevelSinceMs = 0L;        // 当前档位生效起点
     private volatile Integer pendingLevel = null;          // 待确认档位
     private volatile long pendingLevelSinceMs = 0L;        // 待确认起点
@@ -1414,7 +1414,7 @@ public class VideoProcessController {
         // 重置档位状态
         lastSentLevel = 0;
         // 重置档位确认状态
-        currentLevel = 0;
+        currentLevel = 1;
         currentLevelSinceMs = 0L;
         pendingLevel = null;
         pendingLevelSinceMs = 0L;

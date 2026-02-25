@@ -374,7 +374,7 @@ public class BLEManager {
             return;
         }
         
-        log("开始扫描BLE设备...");
+        log("开始扫描BLE设备...请耐心等待");
         
         JsonObject command = new JsonObject();
         command.addProperty("action", "scan");
