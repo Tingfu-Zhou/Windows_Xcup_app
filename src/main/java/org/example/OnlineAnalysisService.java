@@ -111,6 +111,11 @@ public class OnlineAnalysisService {
     private volatile long lastAudioActivityTime = 0;                     // 最后一次检测到音频活动的时间
     private volatile boolean hasDetectedInitialAudio = false;            // 是否检测到过音频（避免启动时立即重置）
 
+    // [FIX] 新增：追踪最后一次收到有效音频数据的时间（不管是否有声音）
+    // 用于检测 WASAPI 完全不回调的情况（电脑无任何应用播放声音时）
+    private volatile long lastAudioDataReceivedTime = 0;
+    private static final long AUDIO_DATA_TIMEOUT_MS = 3000;             // 3秒无音频数据视为静音
+
     // 在线模式音频读取
     private volatile int wasapiSampleRate = 0;
     private volatile int wasapiChannels = 0;
@@ -301,6 +306,7 @@ public class OnlineAnalysisService {
         latestVideoConfidence = 0f;
         latestAudioConfidence = 0f;
         lastAudioInferMs = 0;
+        lastAudioDataReceivedTime = 0;  // [FIX] 重置音频数据接收时间
         stgcnStrideCountdown = 0; // 拖动/seek 后立即允许重新推理
         resetBluetoothStateManager();
 
@@ -382,6 +388,9 @@ public class OnlineAnalysisService {
         try {
             // 只处理有效长度的数据
             if (length > 0) {
+                // [FIX] 记录收到音频数据的时间（无论有无声音），用于超时检测
+                lastAudioDataReceivedTime = System.currentTimeMillis();
+
                 // [ADD] 确保只使用有效长度（JNI 有时复用大数组，尾部会脏）
                 byte[] pcmBytes = (length == audioData.length) ? audioData : java.util.Arrays.copyOf(audioData, length);
 
@@ -688,6 +697,37 @@ public class OnlineAnalysisService {
      */
     private void fusionCycle() {
         if (!isAnalyzing) {
+            return;
+        }
+
+        // [FIX] 超时静音检测：WASAPI 可能在无应用播放音频时不回调，
+        // 此时 onAudioDataCaptured 不执行，基于振幅的静音检测无法工作。
+        // 因此在融合循环中检查：如果已有音频数据记录，但超过 3 秒没收到新数据，视为静音。
+        if (hasDetectedInitialAudio && lastAudioDataReceivedTime > 0) {
+            long timeSinceLastData = System.currentTimeMillis() - lastAudioDataReceivedTime;
+            if (timeSinceLastData >= AUDIO_DATA_TIMEOUT_MS && !isPaused) {
+                log("[在线模式] 超过 " + (timeSinceLastData / 1000.0) + " 秒未收到音频数据，判定为静音");
+                pauseAnalysis(true);
+
+                // 发送停止信号
+                BLEManager bleManager = BLEManager.globalManager;
+                if (bleManager != null && bleManager.isConnected() && !bleManager.isPaused()) {
+                    bleManager.sendAction("Noise", 0);
+                    log("[在线模式] 无音频数据超时，已发送停止信号(Noise)");
+                }
+            }
+            // 超时静音后检查是否需要重置
+            if (timeSinceLastData >= AUDIO_DATA_TIMEOUT_MS && isPaused) {
+                long silenceDuration = System.currentTimeMillis() - lastAudioActivityTime;
+                if (lastAudioActivityTime > 0 && silenceDuration >= SILENCE_RESET_THRESHOLD_MS) {
+                    log(String.format("(超时检测) 静音超过 %.1f 秒，执行状态重置", silenceDuration / 1000.0));
+                    performSilenceReset();
+                }
+            }
+        }
+
+        // [FIX] 对齐 Android：暂停时跳过融合+蓝牙发送，防止残留历史记录覆盖 Noise 停止信号
+        if (isPaused) {
             return;
         }
         
