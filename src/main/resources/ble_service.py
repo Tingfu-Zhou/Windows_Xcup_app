@@ -69,7 +69,7 @@ class BLEService:
 
     async def scan_devices(self, timeout: float = 10.0):
         """扫描BLE设备"""
-        self.log(f"开始扫描BLE设备 (超时: {timeout}秒)...")
+        self.log(f"开始扫描BLE设备, 请耐心等待 (超时: {timeout}秒)...")
 
         try:
             devices = await BleakScanner.discover(timeout=timeout)

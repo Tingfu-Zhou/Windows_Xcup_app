@@ -22,6 +22,7 @@ public class OnlineAnalysisActivity {
     private Label videoActionLabel;
     private Label audioActionLabel;
     private Label fusedActionLabel;
+    private Label fusedLevelLabel;
     private Button exitButton;
     private Label statusLabel;
     
@@ -115,9 +116,10 @@ public class OnlineAnalysisActivity {
             floatingWindow.setResizable(false);
             
             // 创建UI组件
-            videoActionLabel = new Label("视频分析动作(V): --");
-            audioActionLabel = new Label("音频分析动作(A): --");
-            fusedActionLabel = new Label("蓝牙发送动作(融合): --");
+            videoActionLabel = new Label("(V): --");
+            audioActionLabel = new Label("(A): --");
+            fusedActionLabel = new Label("final: --");
+            fusedLevelLabel = new Label("Level: --");
             statusLabel = new Label("状态: 正在初始化...");
             
             exitButton = new Button("退出");
@@ -129,6 +131,7 @@ public class OnlineAnalysisActivity {
             videoActionLabel.setStyle(labelStyle);
             audioActionLabel.setStyle(labelStyle);
             fusedActionLabel.setStyle(labelStyle);
+            fusedLevelLabel.setStyle(labelStyle);
             statusLabel.setStyle(labelStyle + "-fx-font-weight: bold;");
             
             // 布局
@@ -141,6 +144,7 @@ public class OnlineAnalysisActivity {
                 videoActionLabel,
                 audioActionLabel,
                 fusedActionLabel,
+                fusedLevelLabel,
                 exitButton
             );
             
@@ -214,7 +218,7 @@ public class OnlineAnalysisActivity {
         @Override
         public void onVideoActionUpdated(String action, float confidence) {
             Platform.runLater(() -> {
-                String text = String.format("视频分析动作(V): %s (%.1f%%)", action, confidence * 100);
+                String text = String.format("(V): %s (%.1f%%)", action, confidence * 100);
                 videoActionLabel.setText(text);
             });
         }
@@ -222,7 +226,7 @@ public class OnlineAnalysisActivity {
         @Override
         public void onAudioActionUpdated(String action, float confidence) {
             Platform.runLater(() -> {
-                String text = String.format("音频分析动作(A): %s (%.1f%%)", action, confidence * 100);
+                String text = String.format("(A): %s (%.1f%%)", action, confidence * 100);
                 audioActionLabel.setText(text);
             });
         }
@@ -230,11 +234,19 @@ public class OnlineAnalysisActivity {
         @Override
         public void onFusedActionUpdated(String fusedAction) {
             Platform.runLater(() -> {
-                String text = String.format("蓝牙发送动作(融合): %s", fusedAction);
+                String text = String.format("final: %s", fusedAction);
                 fusedActionLabel.setText(text);
                 
                 // 注意：OnlineAnalysisService 中的 fusionCycle 已经处理了蓝牙发送
                 // 这里只更新UI显示，不需要再次发送
+            });
+        }
+
+        @Override
+        public void onFusedLevelUpdated(int finalLevel) {
+            Platform.runLater(() -> {
+                String text = String.format("Level: %d", finalLevel);
+                fusedLevelLabel.setText(text);
             });
         }
         

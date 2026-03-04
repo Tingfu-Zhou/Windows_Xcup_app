@@ -102,6 +102,7 @@ public class OnlineAnalysisService {
     private volatile String latestVideoAction = "";
     private volatile String latestAudioAction = "";
     private volatile String latestFusedAction = "";
+    private int latestFusedLevel = -1;
     private volatile float latestVideoConfidence = 0f;
     private volatile float latestAudioConfidence = 0f;
     private volatile long latestVideoTimestamp = 0;
@@ -160,6 +161,7 @@ public class OnlineAnalysisService {
         void onVideoActionUpdated(String action, float confidence);
         void onAudioActionUpdated(String action, float confidence);
         void onFusedActionUpdated(String fusedAction);
+        void onFusedLevelUpdated(int finalLevel);
         void onAnalysisPausedChanged(boolean isPaused);
     }
     
@@ -807,6 +809,13 @@ public class OnlineAnalysisService {
             latestFusedAction = finalAction;
             if (resultCallback != null) {
                 resultCallback.onFusedActionUpdated(finalAction); // UI更新
+            }
+        }
+        // 档位变化时回调UI
+        if (finalLevel != latestFusedLevel) {
+            latestFusedLevel = finalLevel;
+            if (resultCallback != null) {
+                resultCallback.onFusedLevelUpdated(finalLevel);
             }
         }
     }
