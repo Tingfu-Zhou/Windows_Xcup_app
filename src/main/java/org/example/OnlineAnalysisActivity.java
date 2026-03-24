@@ -4,6 +4,7 @@ import javafx.application.Platform;
 import javafx.geometry.Insets;
 import javafx.scene.Scene;
 import javafx.scene.control.*;
+import javafx.scene.layout.HBox;  // === 新增: 导入HBox用于按钮水平排列 ===
 import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 import javafx.stage.StageStyle;
@@ -25,6 +26,16 @@ public class OnlineAnalysisActivity {
     private Label fusedLevelLabel;
     private Button exitButton;
     private Label statusLabel;
+
+    // === 新增: 最小化相关的UI组件和状态 ===
+    private Button minimizeButton;      // 最小化按钮
+    private VBox contentBox;            // 内容区域(最小化时隐藏)
+    private boolean isMinimized = false; // 当前是否处于最小化状态
+    private static final double NORMAL_WIDTH = 300;   // 正常宽度
+    private static final double NORMAL_HEIGHT = 200;  // 正常高度(增大以容纳按钮栏)
+    private static final double MINIMIZED_WIDTH = 150; // 最小化宽度(需容纳两个按钮)
+    private static final double MINIMIZED_HEIGHT = 80; // 最小化高度(需容纳标题栏+按钮栏)
+    // === 新增结束 ===
     
     // 回调接口
     public interface OnExitCallback {
@@ -125,6 +136,13 @@ public class OnlineAnalysisActivity {
             exitButton = new Button("退出");
             exitButton.setStyle("-fx-background-color: #ff4444; -fx-text-fill: white; -fx-font-weight: bold;");
             exitButton.setOnAction(e -> exitOnlineMode());
+
+            // === 新增: 创建最小化按钮 ===
+            minimizeButton = new Button("_");
+            minimizeButton.setStyle("-fx-background-color: #4488ff; -fx-text-fill: white; -fx-font-weight: bold; -fx-min-width: 30px;");
+            minimizeButton.setTooltip(new Tooltip("最小化 / 还原"));
+            minimizeButton.setOnAction(e -> toggleMinimize());
+            // === 新增结束 ===
             
             // 设置标签样式
             String labelStyle = "-fx-font-size: 12px; -fx-padding: 2px;";
@@ -133,22 +151,36 @@ public class OnlineAnalysisActivity {
             fusedActionLabel.setStyle(labelStyle);
             fusedLevelLabel.setStyle(labelStyle);
             statusLabel.setStyle(labelStyle + "-fx-font-weight: bold;");
+
+            // === 新增: 将退出按钮和最小化按钮放入水平布局(最小化在左,退出在右) ===
+            HBox buttonBar = new HBox(8);
+            buttonBar.getChildren().addAll(minimizeButton, exitButton);
+            // === 新增结束 ===
+            
+            // === 新增: 将分析信息标签放入一个单独的VBox,方便最小化时隐藏 ===
+            contentBox = new VBox(4);
+            contentBox.getChildren().addAll(
+                videoActionLabel,
+                audioActionLabel,
+                fusedActionLabel,
+                fusedLevelLabel
+            );
+            // === 新增结束 ===
             
             // 布局
             VBox root = new VBox(8);
             root.setPadding(new Insets(10));
             root.setStyle("-fx-background-color: #f0f0f0; -fx-border-color: #cccccc; -fx-border-width: 1px;");
             
+            // === 修改: 使用contentBox和buttonBar替换原来的直接添加方式 ===
             root.getChildren().addAll(
                 statusLabel,
-                videoActionLabel,
-                audioActionLabel,
-                fusedActionLabel,
-                fusedLevelLabel,
-                exitButton
+                contentBox,   // 替换原来直接添加的四个label
+                buttonBar     // 替换原来单独的exitButton
             );
+            // === 修改结束 ===
             
-            Scene scene = new Scene(root, 300, 150);
+            Scene scene = new Scene(root, NORMAL_WIDTH, NORMAL_HEIGHT);
             floatingWindow.setScene(scene);
             
             // 设置窗口位置（右上角）
@@ -159,10 +191,55 @@ public class OnlineAnalysisActivity {
             floatingWindow.setOnCloseRequest(e -> exitOnlineMode());
             
             floatingWindow.show();
+            floatingWindow.sizeToScene(); // === 新增: 自动调整窗口大小以适配所有内容 ===
             
             System.out.println("[在线模式] 悬浮窗已创建");
         });
     }
+
+    // === 新增: 最小化/还原切换方法 ===
+    /**
+     * 切换最小化/还原状态
+     * 最小化时隐藏分析内容,窗口缩小为一个小条
+     * 还原时显示所有内容,窗口恢复原始大小
+     */
+    private void toggleMinimize() {
+        isMinimized = !isMinimized;
+        
+        if (isMinimized) {
+            // 最小化: 隐藏内容区域和状态标签,缩小窗口
+            contentBox.setVisible(false);
+            contentBox.setManaged(false);   // 不占用布局空间
+            statusLabel.setVisible(false);
+            statusLabel.setManaged(false);
+            
+            floatingWindow.setWidth(MINIMIZED_WIDTH);
+            floatingWindow.setHeight(MINIMIZED_HEIGHT);
+            
+            // 更新按钮文字,提示可以还原
+            minimizeButton.setText("□");
+            minimizeButton.setTooltip(new Tooltip("还原窗口"));
+            
+            System.out.println("[在线模式] 悬浮窗已最小化");
+        } else {
+            // 还原: 显示所有内容,恢复窗口大小
+            contentBox.setVisible(true);
+            contentBox.setManaged(true);
+            statusLabel.setVisible(true);
+            statusLabel.setManaged(true);
+            
+            floatingWindow.setWidth(NORMAL_WIDTH);
+            floatingWindow.setHeight(NORMAL_HEIGHT);
+            floatingWindow.sizeToScene(); // === 新增: 还原时确保窗口适配内容 ===
+            
+            // 恢复按钮文字
+            minimizeButton.setText("_");
+            minimizeButton.setTooltip(new Tooltip("最小化"));
+            
+            System.out.println("[在线模式] 悬浮窗已还原");
+        }
+    }
+    // === 新增结束 ===
     
     /**
      * 退出在线模式
