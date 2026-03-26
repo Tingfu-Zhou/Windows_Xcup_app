@@ -17,7 +17,7 @@ public class Launcher {
 
             String logFile = logDir + File.separator + "app.log";
             PrintStream fileOut = new PrintStream(
-                new FileOutputStream(logFile, true), true, "UTF-8");
+                new FileOutputStream(logFile, false), true, "UTF-8");
             System.setOut(fileOut);
             System.setErr(fileOut);
         } catch (Exception e) {
