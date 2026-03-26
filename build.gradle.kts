@@ -522,8 +522,7 @@ tasks.create("createInstaller") {
             "--win-menu",
             "--win-shortcut",
             "--win-dir-chooser",
-            "--win-menu-group", "XINGSE",
-            "--win-console"  // 添加控制台窗口，方便调试
+            "--win-menu-group", "XINGSE"
         )
 
         // 添加图标（如果存在）
