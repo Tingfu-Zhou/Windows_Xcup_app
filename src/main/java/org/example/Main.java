@@ -112,7 +112,7 @@ public class Main extends Application {
         /* --------- 主菜单 UI --------- */
         Button btnSelectVideo      = new Button("本地视频模式");
         Button btnOnlineMode       = new Button("在线视频模式");
-        btnScanConnect = new Button("一键扫描并连接蓝牙设备");
+        btnScanConnect = new Button("连接蓝牙（连上会变红）");
 
         // 设置按钮样式
         btnOnlineMode.setStyle("-fx-background-color: #4CAF50; -fx-text-fill: white; -fx-font-weight: bold;");
@@ -257,7 +257,7 @@ public class Main extends Application {
                     btnScanConnect.setText("断开连接");
                     btnScanConnect.setStyle("-fx-background-color: #F44336; -fx-text-fill: white; -fx-font-weight: bold;");
                 } else {
-                    btnScanConnect.setText("一键扫描并连接蓝牙设备");
+                    btnScanConnect.setText("连接蓝牙（连上会变红）");
                     btnScanConnect.setStyle("-fx-background-color: #2196F3; -fx-text-fill: white; -fx-font-weight: bold;");
                 }
             }
