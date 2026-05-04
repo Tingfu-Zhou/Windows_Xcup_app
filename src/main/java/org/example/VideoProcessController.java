@@ -131,8 +131,8 @@ public class VideoProcessController {
     private volatile long  latestAudioLoudTsMs  = 0L;
     private volatile boolean latestAudioLoudValid = false;
 
-    // 视频节律估计器（对齐 Android）
-    private final VideoRhythmEstimator videoRhythmEstimator = new VideoRhythmEstimator();
+    // 视频节律估计器（对齐 Android）— 新方案：基于 ROI 块运动 + 主方向投影 + 自相关主频
+    private final VideoMotionWaveEstimator videoRhythmEstimator = new VideoMotionWaveEstimator();
     private volatile float latestVideoFreqHz = Float.NaN;
     private volatile float latestVideoFreqConf = 0f;
     private volatile long  latestVideoFreqTsMs = 0L;
@@ -600,7 +600,13 @@ public class VideoProcessController {
 
             float[][][][] keypointsRaw = inferenceHelper.detectPose(frame); // [1,1,17,3]
             if (keypointsRaw == null) {
-                log("[Video] No person detected, skip this frame");
+                // 镜头切换 / 未检测到人体：通知节律器并清空 latestVideoFreqHz（修旧版漏掉 reset 的 bug）
+                long framePtsMs = System.currentTimeMillis();
+                videoRhythmEstimator.pushFrame(framePtsMs, null, null);
+                latestVideoFreqHz = Float.NaN;
+                latestVideoFreqConf = 0f;
+                latestVideoFreqTsMs = framePtsMs;
+                log("[Video] No person detected, skip this frame (estimator notified)");
                 return;
             }
 
@@ -611,19 +617,26 @@ public class VideoProcessController {
                 keypoints[i][0] /= imgW;
                 keypoints[i][1] /= imgH;
             }
-            
-            // 将归一化后的关键点推入"视频节律器"（对齐 Android）
+
+            // 将归一化后的关键点 + 当前帧推入"视频运动波形估计器"
             long framePtsMs = System.currentTimeMillis();
-            videoRhythmEstimator.onPoseFrame(keypoints, framePtsMs);
-            
-            // 拉取最新估计值并存储
-            float videoFreq = videoRhythmEstimator.getLatestFreqHz();
-            float videoFreqConf = videoRhythmEstimator.getLatestConf();
-            long videoFreqTs = videoRhythmEstimator.getLatestTsMs();
-            
-            latestVideoFreqHz = videoFreq;
-            latestVideoFreqConf = videoFreqConf;
-            latestVideoFreqTsMs = videoFreqTs;
+            videoRhythmEstimator.pushFrame(framePtsMs, frame, keypoints);
+
+            // 拉取最新估计值并存储（仅在 valid=true 时采用）
+            VideoWaveResult vr = videoRhythmEstimator.getLatestResult();
+            if (vr != null && vr.valid) {
+                latestVideoFreqHz   = vr.freqHz;
+                latestVideoFreqConf = vr.confidence;
+                latestVideoFreqTsMs = vr.timestampMs;
+                log(String.format("[频率测试] [离线模式] 视频运动波形 - f=%.2fHz, conf=%.2f, per=%.2f, mE=%.3f, pos01=%.2f, locked=%s",
+                        vr.freqHz, vr.confidence, vr.periodicity, vr.motionEnergy, vr.position01, vr.locked));
+                log("[VideoWave] " + vr.debugInfo);
+            } else {
+                latestVideoFreqHz   = Float.NaN;
+                latestVideoFreqConf = 0f;
+                latestVideoFreqTsMs = framePtsMs;
+                if (vr != null) log("[VideoWave] " + vr.debugInfo);
+            }
 
             poseWindow.add(keypoints);
             if (poseWindow.size() > WINDOW_SIZE) poseWindow.poll();
