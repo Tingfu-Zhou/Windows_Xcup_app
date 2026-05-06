@@ -837,19 +837,63 @@ public class OnlineAnalysisService {
     /**
      * 12.11 计算最终节律档位（0..10）。
      *
-     * <p>当前策略：仅使用音频节律映射为档位，并做“置信度阈值 + 方向性门控（涨档更严格，降档更宽松）”。
-     * 预留 videoFreq/videoFreqConf 参数，便于未来扩展为音视频融合节律。</p>
+     * <p>当前策略：
+     * 优先使用视频节律 videoFreq；
+     * 如果 videoFreq 为 Float.NaN 或 <= 0，则回退使用音频响度档位 audioFreq。
+     *
+     * audioFreq 当前实际承载 loudness level(float)，通过 clampLevelFromLoudness() 转成档位。
+     * videoFreq 当前实际承载 Hz，通过 mapFreqToLevel() 转成档位。
+     * </p>
      */
     private int computeFinalFreq(float audioFreq, float audioFreqConf, float videoFreq, float videoFreqConf) {
-        // 临时采用音频节律作为最终节律
-        // int finalFreq = mapFreqToLevel(audioFreq);
-        int videoFre = mapFreqToLevel(videoFreq);
 
-        int finalFreq = clampLevelFromLoudness(audioFreq); // [MOD] audioFreq 实际是 level(float)
+        // [ADD] 判断视频节律是否有效：videoFreq 不是 NaN 且大于 0
+        final boolean useVideoFreq = !Float.isNaN(videoFreq) && videoFreq > 0f;
+
+        // [ADD] 根据来源选择候选档位与置信度
+        int finalFreq;
+        float selectedConf;
+        String rhythmSource;
+
+        if (useVideoFreq) {
+            // [ADD] 视频节律有效：优先使用视频 Hz 映射档位
+            finalFreq = mapFreqToLevel(videoFreq);
+            selectedConf = videoFreqConf;
+            rhythmSource = "视频节律";
+
+            log(String.format(
+                    "最终节律：使用来源=%s，videoFreq=%.3fHz，videoConf=%.2f，candidateLevel=%d",
+                    rhythmSource, videoFreq, videoFreqConf, finalFreq
+            ));
+        } else {
+            // [ADD] 视频节律无效：回退使用音频响度档位
+            finalFreq = clampLevelFromLoudness(audioFreq); // [MOD] audioFreq 实际是 level(float)
+            selectedConf = audioFreqConf;
+            rhythmSource = "音频响度";
+
+            log(String.format(
+                    "最终节律：使用来源=%s，原因=videoFreq为NaN或<=0，audioLevelLike=%.3f，audioConf=%.2f，candidateLevel=%d",
+                    rhythmSource, audioFreq, audioFreqConf, finalFreq
+            ));
+        }
+
+        // [ADD] 保留两路原始结果日志，方便排查音频/视频节律来源
+        int audioLevel = clampLevelFromLoudness(audioFreq);
+        log(String.format(
+                "音频响度：audioLevelLike=%.3f，audioConf=%.2f，level=%d",
+                audioFreq, audioFreqConf, audioLevel
+        ));
+
+        int videoLevel = mapFreqToLevel(videoFreq);
+        log(String.format(
+                "视频节律：videoFreq=%.3fHz，videoConf=%.2f，level=%d",
+                videoFreq, videoFreqConf, videoLevel
+        ));
 
         // === 12.12: 方向性置信度门控（涨档更严格，降档更宽松） ===
         {
-            float conf = audioFreqConf;      // 当前这帧的置信度
+            // [MOD] 原来固定使用 audioFreqConf，现在改为当前实际节律来源对应的置信度
+            float conf = selectedConf;
 
             // 三个可调参数
             final float CONF_IGNORE = 0.10f;  // 极低置信度：整体忽略本次节律
@@ -857,23 +901,45 @@ public class OnlineAnalysisService {
             final float CONF_DOWN   = 0.10f;  // 降档所需置信度（相对宽松）
 
             int curLevel       = currentLevel;  // 当前已生效档位（0..10）
-            int candidateLevel = finalFreq;     // 本次根据 audioFreq 映射出来的档位
+            int candidateLevel = finalFreq;     // [MOD] 当前实际来源映射出来的候选档位
+
+            // [ADD] 当前来源的有效性判断
+            boolean selectedInvalid = useVideoFreq
+                    ? Float.isNaN(videoFreq)
+                    : Float.isNaN(audioFreq);
 
             // 1) 极低置信度：直接清空本次节律，维持 currentLevel
-            if (Float.isNaN(audioFreq) || conf < CONF_IGNORE) {
+            if (selectedInvalid || conf < CONF_IGNORE) {
+                log(String.format(
+                        "最终节律：来源=%s，conf=%.2f < CONF_IGNORE=%.2f，本次节律整体忽略，沿用 currentLevel=%d",
+                        rhythmSource, conf, CONF_IGNORE, curLevel
+                ));
                 finalFreq = curLevel;  // 不给 updateBluetoothState 提供变档机会
             } else {
                 // 2) 根据档位变动方向应用不同门槛
                 if (candidateLevel > curLevel && conf < CONF_UP) {
                     // 尝试“涨档”但置信度不足 → 不允许涨档
+                    log(String.format(
+                            "最终节律：来源=%s，尝试涨档 %d→%d 但 conf=%.2f < CONF_UP=%.2f，本次不生效，沿用 currentLevel=%d",
+                            rhythmSource, curLevel, candidateLevel, conf, CONF_UP, curLevel
+                    ));
                     finalFreq = curLevel;
                 } else if (candidateLevel < curLevel && conf < CONF_DOWN) {
-                    // 尝试“降档”但置信度也太低 → 不允许降档（可视需要放宽）
+                    // 尝试“降档”但置信度也太低 → 不允许降档
+                    log(String.format(
+                            "最终节律：来源=%s，尝试降档 %d→%d 但 conf=%.2f < CONF_DOWN=%.2f，本次不生效，沿用 currentLevel=%d",
+                            rhythmSource, curLevel, candidateLevel, conf, CONF_DOWN, curLevel
+                    ));
                     finalFreq = curLevel;
                 }
                 // candidateLevel == curLevel 时无需处理
             }
         }
+
+        log(String.format(
+                "最终节律：最终使用来源=%s，输出档位=%d",
+                rhythmSource, finalFreq
+        ));
 
         return finalFreq;
     }
